@@ -117,7 +117,7 @@ test('persisted evaluations, filters, cursor navigation and exact transaction de
   await expect(page.getByText(/no evaluations/i)).toBeVisible();
 });
 
-test('policy inspection and optional administrator revision are read only', async ({ page }) => {
+test('policy inspection and administrator snapshot use read endpoints', async ({ page }) => {
   test.skip(phase !== 'foundation');
   await connect(page);
   await page.getByRole('link', { name: 'Policy', exact: true }).click();
@@ -155,7 +155,8 @@ test('policy inspection and optional administrator revision are read only', asyn
   await expect(page.getByText(response.headers().etag, { exact: true })).toBeVisible();
   await page.getByText('Administrator access', { exact: false }).first().click();
   await preview(page, 'policy-desktop.png');
-  await expect(page.getByRole('button', { name: /activate|validate/i })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Validate draft', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Activate policy', exact: true })).toHaveCount(0);
 });
 
 test('authentication, revocation and ordinary credentials cannot read administration', async ({

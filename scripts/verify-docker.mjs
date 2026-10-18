@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
+import { parse, stringify } from 'lossless-json';
 import { waitForReady } from './readiness.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,7 +30,12 @@ const revokedSecret = randomBytes(32).toString('hex');
 const revokedKey = `revoked.${revokedSecret}`;
 const readOnlySecret = randomBytes(32).toString('hex');
 const readOnlyKey = `readonly.${readOnlySecret}`;
-secrets.push(adminKey, apiKey, revokedKey, readOnlyKey);
+const policyKeys = Object.fromEntries(
+  ['forms', 'invalid', 'unchanged', 'concurrent', 'unknown', 'permissions', 'rate', 'live'].map(
+    (name) => [name, `ui-policy-${name}.${randomBytes(32).toString('hex')}`],
+  ),
+);
+secrets.push(adminKey, apiKey, revokedKey, readOnlyKey, ...Object.values(policyKeys));
 
 function safe(value) {
   let result = String(value);
@@ -96,7 +102,11 @@ const sql = (query) =>
   );
 const ready = (url, headers) => waitForReady(url, { headers });
 
-async function api(base, endpoint, { method = 'GET', body, key = apiKey } = {}) {
+async function api(
+  base,
+  endpoint,
+  { method = 'GET', body, key = apiKey, expectedStatus = method === 'POST' ? 201 : 200 } = {},
+) {
   const response = await fetch(`${base}${endpoint}`, {
     method,
     headers: { 'X-API-Key': key, ...(body ? { 'Content-Type': 'application/json' } : {}) },
@@ -106,15 +116,34 @@ async function api(base, endpoint, { method = 'GET', body, key = apiKey } = {}) 
   const text = await response.text();
   assert.equal(
     response.status,
-    method === 'POST' ? 201 : 200,
+    expectedStatus,
     `${method} ${endpoint} returned ${response.status}`,
   );
   return text;
 }
 
+async function policy(base, { document, etag, key = adminKey } = {}) {
+  const response = await fetch(`${base}/api/v1/admin/policy`, {
+    method: document ? 'PUT' : 'GET',
+    headers: {
+      'X-API-Key': key,
+      ...(document ? { 'Content-Type': 'application/json', 'If-Match': etag } : {}),
+    },
+    ...(document ? { body: stringify(document) } : {}),
+    redirect: 'error',
+    signal: AbortSignal.timeout(12_000),
+  });
+  const raw = await response.text();
+  assert.equal(response.status, 200, `Policy ${document ? 'activation' : 'read'} failed`);
+  const revisionEtag = response.headers.get('etag');
+  assert.match(revisionEtag ?? '', /^"policy-revision-[1-9]\d*"$/);
+  return { data: parse(raw), etag: revisionEtag };
+}
+
 let base;
 let ui;
 let fixture;
+let precisePayload;
 let backendConfigured = false;
 let uiConfigured = false;
 async function browser(phase) {
@@ -123,6 +152,7 @@ async function browser(phase) {
     foundation:
       'persisted evaluations|policy inspection|authentication, revocation|keys stay in memory',
     playground: 'playground:',
+    policy: 'policy:',
     'rate-limit': 'a real rate limit',
     'dependency-down': 'an unavailable real dependency',
     recovered: 'dependency recovery and proxy DNS',
@@ -140,6 +170,7 @@ async function browser(phase) {
         E2E_ADMIN_KEY: adminKey,
         E2E_REVOKED_KEY: revokedKey,
         E2E_READONLY_KEY: readOnlyKey,
+        E2E_POLICY_KEYS: JSON.stringify(policyKeys),
         E2E_FIXTURE: JSON.stringify(fixture),
       },
     },
@@ -222,6 +253,19 @@ try {
     VALUES ('ui-readonly','local-demo',true,ARRAY['READ','POLICY'],ARRAY[]::text[]);
     INSERT INTO fraud.api_credentials(key_id,principal_id,secret_hash,valid_from,expires_at)
     VALUES ('readonly','ui-readonly','${createHash('sha256').update(readOnlySecret).digest('hex')}',clock_timestamp(),clock_timestamp()+interval '1 day');`);
+  await sql(
+    Object.values(policyKeys)
+      .map((credential) => {
+        const [id, secret] = credential.split('.');
+        const hash = createHash('sha256').update(secret).digest('hex');
+        return `INSERT INTO fraud.api_principals(principal_id,scope,enabled,roles,location_sources)
+          VALUES ('${id}','global-policy',true,ARRAY['POLICY_ADMIN'],ARRAY[]::text[]);
+          INSERT INTO fraud.api_credentials(key_id,principal_id,secret_hash,valid_from,expires_at)
+          VALUES ('${id}','${id}','${hash}',clock_timestamp(),clock_timestamp()+interval '1 day');`;
+      })
+      .join('\n'),
+  );
+  const initialPolicy = await policy(base);
 
   const now = Date.now();
   fixture = {
@@ -258,9 +302,11 @@ try {
         city: 'Cape Town',
       },
     };
+    const body = JSON.stringify(event).replace('"__EXACT__"', fixture.precision);
+    if (eventId === fixture.preciseEvent) precisePayload = body;
     await api(base, '/api/v1/transactions', {
       method: 'POST',
-      body: JSON.stringify(event).replace('"__EXACT__"', fixture.precision),
+      body,
     });
   }
   assert(
@@ -305,6 +351,19 @@ try {
   console.log(`Disposable UI is ready: ${ui}`);
   await browser('foundation');
   await browser('playground');
+  await browser('policy');
+  const editedPolicy = await policy(base);
+  if (editedPolicy.data.policyHash !== initialPolicy.data.policyHash) {
+    const restored = await policy(base, {
+      document: initialPolicy.data.document,
+      etag: editedPolicy.etag,
+    });
+    assert.equal(
+      restored.data.policyHash,
+      initialPolicy.data.policyHash,
+      'Policy fixture was not restored',
+    );
+  }
   await browser('rate-limit');
 
   await compose('stop', 'redis');
@@ -417,6 +476,95 @@ try {
   assert(
     servedBy.size > 1 && !servedBy.has(null),
     'Balanced verification must reach two distinct ready app instances',
+  );
+  const instances = (await compose('ps', '-q', 'app')).split('\n').filter(Boolean).sort();
+  assert.equal(instances.length, 2, 'Live policy verification requires two app instances');
+  const liveKey = policyKeys.live;
+  const beforeLive = await policy(ui, { key: liveKey });
+  const originalResult = await api(ui, `/api/v1/transactions/${fixture.preciseEvent}`);
+  const saved = parse(originalResult);
+  assert.equal(saved.evaluation.policyHash, beforeLive.data.policyHash);
+  assert.equal(
+    saved.evaluation.ruleResults.find((rule) => rule.ruleId === 'HIGH_AMOUNT').status,
+    'NO_MATCH',
+  );
+  const candidate = parse(stringify(beforeLive.data.document));
+  const currency = saved.transaction.currency;
+  const scale = Number(candidate.supportedCurrencies[currency].scale.toString());
+  candidate.rules.highAmount.thresholds[currency] =
+    scale === 0 ? '1' : `0.${'0'.repeat(scale - 1)}1`;
+  assert.notEqual(
+    candidate.rules.highAmount.thresholds[currency],
+    beforeLive.data.document.rules.highAmount.thresholds[currency],
+  );
+  const validation = parse(
+    await api(ui, '/api/v1/admin/policy/validate', {
+      method: 'POST',
+      body: stringify(candidate),
+      key: liveKey,
+      expectedStatus: 200,
+    }),
+  );
+  const activated = await policy(ui, { document: candidate, etag: beforeLive.etag, key: liveKey });
+  assert.equal(activated.data.policyHash, validation.policyHash);
+  assert.notEqual(activated.etag, beforeLive.etag, 'Changed policy must advance the revision');
+  try {
+    for (const instance of instances) {
+      const endpoint = `http://${await run('docker', ['port', instance, '8080/tcp'], { quiet: true })}`;
+      const rules = parse(await api(endpoint, '/api/v1/rules'));
+      assert.equal(
+        rules.policyHash,
+        activated.data.policyHash,
+        'Each instance must see live policy',
+      );
+      const event = {
+        ...saved.transaction,
+        eventId: `ui-live-policy-${randomUUID()}`,
+        customerId: `ui-live-customer-${randomUUID()}`,
+        instrumentId: `ui-live-card-${randomUUID()}`,
+        occurredAt: new Date().toISOString(),
+      };
+      const evaluated = parse(
+        await api(endpoint, '/api/v1/transactions', {
+          method: 'POST',
+          body: stringify(event),
+        }),
+      );
+      assert.equal(evaluated.evaluation.policyHash, activated.data.policyHash);
+      assert.equal(
+        evaluated.evaluation.ruleResults.find((rule) => rule.ruleId === 'HIGH_AMOUNT').status,
+        'MATCH',
+      );
+      assert.equal(
+        await api(endpoint, `/api/v1/transactions/${fixture.preciseEvent}`),
+        originalResult,
+        'Saved evidence must keep its original policy',
+      );
+      assert.equal(
+        await api(endpoint, '/api/v1/transactions', {
+          method: 'POST',
+          body: precisePayload,
+          expectedStatus: 200,
+        }),
+        originalResult,
+        'Identical replay must preserve the original result',
+      );
+    }
+    assert.deepEqual(
+      (await compose('ps', '-q', 'app')).split('\n').filter(Boolean).sort(),
+      instances,
+      'Live policy changes must not restart app instances',
+    );
+  } finally {
+    const restored = await policy(ui, {
+      document: beforeLive.data.document,
+      etag: activated.etag,
+      key: liveKey,
+    });
+    assert.equal(restored.data.policyHash, beforeLive.data.policyHash);
+  }
+  console.log(
+    'Live policy changed across two running app instances; stored results and identical replays retained their original policy.',
   );
   await browser('balanced');
   console.log(

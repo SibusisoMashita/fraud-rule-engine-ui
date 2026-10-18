@@ -16,6 +16,8 @@ export type TransactionInput = Exact<components['schemas']['TransactionInput']>;
 export type TransactionResource = Exact<components['schemas']['TransactionResource']>;
 export type RulesView = Exact<components['schemas']['RulesView']>;
 export type EditablePolicy = Exact<components['schemas']['EditablePolicy']>;
+export type PolicyDocument = Exact<components['schemas']['PolicyDocument']>;
+export type PolicyValidation = Exact<components['schemas']['PolicyValidation']>;
 export type EvaluationFilters = NonNullable<operations['listEvaluations']['parameters']['query']>;
 
 export interface ApiResponse<T> {
@@ -153,12 +155,35 @@ function rulesView(value: unknown): boolean {
   );
 }
 
-function editablePolicy(value: unknown): boolean {
+const MAX_POLICY_REVISION = '9223372036854775807';
+
+function policyRevision(value: string): boolean {
   return (
+    /^[1-9][0-9]*$/.test(value) &&
+    (value.length < MAX_POLICY_REVISION.length ||
+      (value.length === MAX_POLICY_REVISION.length && value <= MAX_POLICY_REVISION))
+  );
+}
+
+function etagRevision(value: string | null): string | undefined {
+  const revision = value?.match(/^"policy-revision-([1-9][0-9]*)"$/)?.[1];
+  return revision !== undefined && policyRevision(revision) ? revision : undefined;
+}
+
+function policyValidation(value: unknown): boolean {
+  return (
+    record(value) && typeof value.policyHash === 'string' && /^[a-f0-9]{64}$/.test(value.policyHash)
+  );
+}
+
+function editablePolicy(value: unknown, response: Response): boolean {
+  return (
+    policyValidation(value) &&
     record(value) &&
     isLosslessNumber(value.revision) &&
-    strings(value, 'policyHash') &&
-    record(value.document)
+    policyRevision(value.revision.value) &&
+    record(value.document) &&
+    etagRevision(response.headers.get('ETag')) === value.revision.value
   );
 }
 
@@ -177,6 +202,8 @@ function retryTime(header: string | null): number | undefined {
 
 const unknownSubmission =
   'The submission outcome is unknown. Retrieve the transaction or replay the same event ID and exact payload before changing it.';
+const unknownActivation =
+  'The policy activation outcome is unknown. Read the active policy and compare its revision and hash before deciding what to do. Do not activate again automatically.';
 
 function submissionOutcome(status?: number): 'UNKNOWN' | 'REJECTED' {
   return status !== undefined && status >= 400 && status < 500 ? 'REJECTED' : 'UNKNOWN';
@@ -187,7 +214,7 @@ function errorMessage(status: number, submission = false, code?: string): string
     case 400:
       return submission
         ? 'The transaction was not accepted. Check its fields before trying again.'
-        : 'The request was not accepted. Check the filters and try again.';
+        : 'The request was not accepted. Check its fields before trying again.';
     case 401:
       return 'The API key is no longer accepted. Connect again with a valid key.';
     case 403:
@@ -207,7 +234,13 @@ function errorMessage(status: number, submission = false, code?: string): string
     case 415:
       return 'The service requires a JSON request.';
     case 422:
-      return 'The submitted values do not meet the active policy requirements.';
+      return code === 'POLICY_INVALID'
+        ? 'The policy document is incompatible with this engine. Review it and validate again.'
+        : 'The submitted values do not meet the active policy requirements.';
+    case 412:
+      return 'The active policy changed. Keep your draft, reload the active policy and review the changes before activating again.';
+    case 428:
+      return 'Activation requires the current policy revision. Reload the active policy before activating this draft.';
     case 429:
       return 'The request limit was reached. Wait before trying again.';
     case 503:
@@ -222,11 +255,12 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
   let cooldown: ApiError | undefined;
 
   async function request<T>(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'PUT',
     path: string,
-    valid: (value: unknown) => boolean,
+    valid: (value: unknown, response: Response) => boolean,
     signal?: AbortSignal,
     body?: string,
+    context: { mutation?: 'transaction' | 'policy'; etag?: string } = {},
   ): Promise<ApiResponse<Exact<T>>> {
     // A local block has no submission outcome: callers must retain any earlier uncertainty.
     signal?.throwIfAborted();
@@ -239,7 +273,9 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
       });
     }
 
-    const submission = method === 'POST';
+    const submission = context.mutation === 'transaction';
+    const mutation = context.mutation !== undefined;
+    const unknownMessage = context.mutation === 'policy' ? unknownActivation : unknownSubmission;
     let response: Response | undefined;
     let raw: string;
     try {
@@ -248,13 +284,14 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
         headers: {
           Accept: 'application/json',
           'X-API-Key': apiKey,
-          ...(submission ? { 'Content-Type': 'application/json' } : {}),
+          ...(method !== 'GET' ? { 'Content-Type': 'application/json' } : {}),
+          ...(context.etag !== undefined ? { 'If-Match': context.etag } : {}),
         },
         cache: 'no-store',
         credentials: 'omit',
         redirect: 'error',
         signal,
-        ...(submission ? { body } : {}),
+        ...(method !== 'GET' ? { body } : {}),
       });
       raw = await response.text();
       signal?.throwIfAborted();
@@ -263,11 +300,14 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
         // The HTTP status and headers remain authoritative when its optional error body is lost.
         raw = '';
       } else {
-        if (submission) {
+        if (mutation) {
           const retryAt = retryTime(response?.headers.get('Retry-After') ?? null);
-          const failure = new ApiError(unknownSubmission, {
+          const failure = new ApiError(unknownMessage, {
             status: response?.status ?? 0,
-            code: 'SUBMISSION_OUTCOME_UNKNOWN',
+            code:
+              context.mutation === 'policy'
+                ? 'POLICY_OUTCOME_UNKNOWN'
+                : 'SUBMISSION_OUTCOME_UNKNOWN',
             correlationId: safeIdentifier(
               response?.headers.get('X-Correlation-ID'),
               /^[A-Za-z0-9._:-]{1,128}$/,
@@ -304,13 +344,16 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
     if (!response.ok) {
       const problem = record(parsed) ? parsed : {};
       const retryAt = retryTime(response.headers.get('Retry-After'));
-      const outcome = submission ? submissionOutcome(response.status) : undefined;
+      const outcome = mutation ? submissionOutcome(response.status) : undefined;
       const code = safeIdentifier(problem.code, /^[A-Z][A-Z0-9_]{0,63}$/) ?? 'REQUEST_FAILED';
       const failure = new ApiError(
-        outcome === 'UNKNOWN' ? unknownSubmission : errorMessage(response.status, submission, code),
+        outcome === 'UNKNOWN' ? unknownMessage : errorMessage(response.status, submission, code),
         {
           status: response.status,
-          code,
+          code:
+            context.mutation === 'policy' && outcome === 'UNKNOWN'
+              ? 'POLICY_OUTCOME_UNKNOWN'
+              : code,
           correlationId:
             safeIdentifier(problem.correlationId, /^[A-Za-z0-9._:-]{1,128}$/) ??
             safeIdentifier(response.headers.get('X-Correlation-ID'), /^[A-Za-z0-9._:-]{1,128}$/),
@@ -326,16 +369,14 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
       throw failure;
     }
 
-    const validStatus = !submission || response.status === 200 || response.status === 201;
-    if (!validStatus || !valid(parsed)) {
+    const validStatus = response.status === 200 || (submission && response.status === 201);
+    if (!validStatus || !valid(parsed, response)) {
       throw new ApiError(
-        submission
-          ? unknownSubmission
-          : 'The service returned an unreadable response. Try again later.',
+        mutation ? unknownMessage : 'The service returned an unreadable response. Try again later.',
         {
           status: response.status,
-          code: 'INVALID_RESPONSE',
-          ...(submission ? ({ outcome: 'UNKNOWN' } as const) : {}),
+          code: context.mutation === 'policy' ? 'POLICY_OUTCOME_UNKNOWN' : 'INVALID_RESPONSE',
+          ...(mutation ? ({ outcome: 'UNKNOWN' } as const) : {}),
         },
       );
     }
@@ -391,16 +432,48 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
         transactionResource,
         signal,
         raw,
+        { mutation: 'transaction' },
       );
     },
     getRules(signal?: AbortSignal) {
       return get<components['schemas']['RulesView']>('/api/v1/rules', rulesView, signal);
     },
     getEditablePolicy(signal?: AbortSignal) {
-      return get<components['schemas']['EditablePolicy']>(
+      return request<components['schemas']['EditablePolicy']>(
+        'GET',
         '/api/v1/admin/policy',
         editablePolicy,
         signal,
+      );
+    },
+    validatePolicy(raw: string, signal?: AbortSignal) {
+      return request<components['schemas']['PolicyValidation']>(
+        'POST',
+        '/api/v1/admin/policy/validate',
+        policyValidation,
+        signal,
+        raw,
+      );
+    },
+    /** An uncertain activation must be reconciled by reading policy, never automatically retried. */
+    async activatePolicy(raw: string, etag: string, signal?: AbortSignal) {
+      signal?.throwIfAborted();
+      if (etagRevision(etag) === undefined) {
+        throw new ApiError(
+          'Load the active policy to obtain a valid revision ETag before activation.',
+          {
+            status: 0,
+            code: 'INVALID_POLICY_ETAG',
+          },
+        );
+      }
+      return request<components['schemas']['EditablePolicy']>(
+        'PUT',
+        '/api/v1/admin/policy',
+        editablePolicy,
+        signal,
+        raw,
+        { mutation: 'policy', etag },
       );
     },
   };

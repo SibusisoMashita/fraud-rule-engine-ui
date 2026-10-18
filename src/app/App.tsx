@@ -6,6 +6,7 @@ import { Policy } from '../features/policy/Policy';
 import { Transactions } from '../features/transactions/Transactions';
 import { Icon } from '../shared/Icon';
 import { PlaygroundProvider } from '../features/transactions/playground';
+import { PolicyEditorProvider } from '../features/policy/editor';
 
 type Screen = 'evaluations' | 'policy' | 'transactions';
 const screens: Array<{
@@ -96,13 +97,15 @@ function Shell() {
           <Connection />
           <div key={generation}>
             <PlaygroundProvider>
-              {screen === 'policy' ? (
-                <Policy />
-              ) : screen === 'transactions' ? (
-                <Transactions />
-              ) : (
-                <Evaluations />
-              )}
+              <PolicyEditorProvider>
+                {screen === 'policy' ? (
+                  <Policy />
+                ) : screen === 'transactions' ? (
+                  <Transactions />
+                ) : (
+                  <Evaluations />
+                )}
+              </PolicyEditorProvider>
             </PlaygroundProvider>
           </div>
         </main>

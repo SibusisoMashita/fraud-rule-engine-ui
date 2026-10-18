@@ -27,7 +27,8 @@ body {
 }
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 button,
@@ -297,7 +298,8 @@ label {
   font-weight: 600;
 }
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-width: 0;
   border: 1px solid #c9d6de;
@@ -307,6 +309,156 @@ select {
   background: white;
   color: #203d4d;
   font-size: 12px;
+}
+
+.policy-editor {
+  margin-top: 24px;
+}
+.policy-editor-heading,
+.currency-heading,
+.policy-editor-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.policy-editor-heading {
+  margin-bottom: 24px;
+}
+.policy-editor-heading h3 {
+  font-size: 23px;
+  margin-bottom: 8px;
+}
+.policy-editor-heading p,
+.policy-section > p,
+.policy-review > p {
+  font-size: 12px;
+  color: var(--muted);
+}
+.policy-form-grid {
+  display: grid;
+  gap: 20px;
+}
+.policy-section {
+  min-width: 0;
+  margin: 0;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.policy-section legend {
+  padding: 0 8px;
+  color: var(--brand-dark);
+  font-size: 15px;
+  font-weight: 600;
+}
+.policy-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}
+.policy-checks {
+  display: flex;
+  gap: 14px 24px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+.policy-checks label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.policy-checks input {
+  width: 17px;
+  min-height: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--brand);
+}
+.currency-heading {
+  margin-top: 20px;
+}
+.currency-add {
+  display: flex;
+  gap: 12px;
+  align-items: end;
+  flex-wrap: wrap;
+  margin-top: 22px;
+}
+.policy-json,
+.policy-review,
+.policy-recovery {
+  margin-top: 24px;
+  padding: 22px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}
+.policy-json summary {
+  padding: 0;
+}
+.policy-json textarea {
+  min-height: 320px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  margin-top: 12px;
+  tab-size: 2;
+}
+.policy-review h4 {
+  margin-bottom: 12px;
+  font-size: 17px;
+}
+.policy-diff {
+  width: 100%;
+  min-width: 0;
+  margin-top: 20px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+.policy-diff th,
+.policy-diff td {
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+  padding: 12px 10px;
+  overflow-wrap: anywhere;
+}
+.policy-diff th {
+  color: var(--brand-dark);
+}
+.policy-editor-actions {
+  margin-top: 24px;
+}
+.policy-recovery {
+  border-color: #d5bd87;
+  background: #fff7e6;
+}
+@media (max-width: 600px) {
+  .policy-field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .policy-section,
+  .policy-json,
+  .policy-review,
+  .policy-recovery {
+    padding: 18px 16px;
+  }
+  .policy-editor-actions .button,
+  .currency-add label {
+    width: 100%;
+  }
+  .policy-diff th,
+  .policy-diff td {
+    padding-inline: 5px;
+    font-size: 11px;
+  }
 }
 input::placeholder {
   color: #687c89;

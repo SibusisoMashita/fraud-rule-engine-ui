@@ -20,6 +20,27 @@ const submittedJson = `{
   "physicalLocation":{"latitude":-33.924900,"longitude":18.424100,
     "accuracyKm":0.12345678901234567890123456789,"source":"VERIFIED_CARD_PRESENT_TERMINAL"}
 }`;
+const policyHash = 'a'.repeat(64);
+const policyDocumentJson = `{
+  "schemaVersion":1,"canonicalizationVersion":1,
+  "supportedCurrencies":{"ZAR":{"scale":2,"maxAmount":"1000000.00"}},
+  "ingest":{"maxEventAgeSeconds":86400,"maxFutureSkewSeconds":300},
+  "rules":{
+    "highAmount":{"enabled":true,"thresholds":{"ZAR":"25000.00"}},
+    "transactionVelocity":{"enabled":true,"windowSeconds":300,"maxTransactions":5},
+    "cumulativeSpend":{"enabled":true,"windowSeconds":3600,"thresholds":{"ZAR":"30000.00"}},
+    "impossibleTravel":{"enabled":true,"maxComparisonAgeSeconds":86400,"maxCandidates":100,
+      "maxSpeedKmh":900.00,"minDistanceKm":100,"travelAllowanceKm":20,
+      "maxAccuracyKm":0.12345678901234567890123456789,
+      "trustedSources":["VERIFIED_CARD_PRESENT_TERMINAL"],"eligibleChannels":["CARD_PRESENT"]},
+    "smallPaymentBurstThenLarge":{"enabled":true,"windowSeconds":300,"minSmallPayments":3,
+      "smallPaymentMaximum":{"ZAR":"50.00"},"largePaymentThreshold":{"ZAR":"5000.00"}}
+  }
+}`;
+
+function policySnapshotJson(revision = '1') {
+  return `{"revision":${revision},"policyHash":"${policyHash}","document":${policyDocumentJson}}`;
+}
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function response(body: string, status = 200, headers: HeadersInit = {}) {
@@ -62,7 +83,7 @@ describe('lossless API data', () => {
 
   it('keeps administrator revision and ETag exact', async () => {
     fetchMock.mockResolvedValue(
-      response('{"revision":9223372036854775807,"policyHash":"hash","document":{}}', 200, {
+      response(policySnapshotJson('9223372036854775807'), 200, {
         ETag: '"policy-revision-9223372036854775807"',
       }),
     );
@@ -518,6 +539,271 @@ describe('transaction submission', () => {
     });
     expect(onRateLimit).toHaveBeenCalledExactlyOnceWith(Date.now() + 3000);
     await expect(client.getRules()).rejects.toMatchObject({ status: 503, outcome: undefined });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe('policy administration', () => {
+  it('validates exact policy JSON without mutation semantics or an activation precondition', async () => {
+    fetchMock.mockResolvedValue(response(`{"policyHash":"${policyHash}"}`));
+    const signal = new AbortController().signal;
+    const result = await createApiClient(key).validatePolicy(policyDocumentJson, signal);
+    expect(result).toMatchObject({ status: 200, data: { policyHash } });
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/api/v1/admin/policy/validate', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'X-API-Key': key, 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'omit',
+      redirect: 'error',
+      signal,
+      body: policyDocumentJson,
+    });
+  });
+
+  it.each([400, 403, 422, 503])(
+    'does not report an unknown activation when validation returns HTTP %s',
+    async (status) => {
+      fetchMock.mockResolvedValue(response('{"code":"POLICY_INVALID"}', status));
+      const failure = await createApiClient(key)
+        .validatePolicy(policyDocumentJson)
+        .catch((error: unknown) => error);
+      expect(failure).toMatchObject({ status, outcome: undefined });
+      expect(String(failure)).not.toMatch(/activation outcome is unknown/i);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not treat a validation network failure or cancellation as a possible activation', async () => {
+    fetchMock
+      .mockRejectedValueOnce(new TypeError(`Synthetic network failure ${key}`))
+      .mockRejectedValueOnce(new DOMException('Cancelled', 'AbortError'));
+    const client = createApiClient(key);
+    await expect(client.validatePolicy(policyDocumentJson)).rejects.toMatchObject({
+      code: 'NETWORK_UNAVAILABLE',
+      outcome: undefined,
+    });
+    await expect(
+      client.validatePolicy(policyDocumentJson, new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['{"policyHash":"invalid"}', 200],
+    ['{}', 200],
+    [`{"policyHash":"${policyHash}"}`, 201],
+  ] as const)(
+    'rejects an invalid validation response without mutation uncertainty',
+    async (raw, status) => {
+      fetchMock.mockResolvedValue(response(raw, status));
+      await expect(createApiClient(key).validatePolicy(policyDocumentJson)).rejects.toMatchObject({
+        code: 'INVALID_RESPONSE',
+        outcome: undefined,
+      });
+    },
+  );
+
+  it('activates the exact document with its strong If-Match revision and preserves precise returned values', async () => {
+    const revision = '9007199254740993';
+    const etag = `"policy-revision-${revision}"`;
+    const signal = new AbortController().signal;
+    fetchMock.mockResolvedValue(response(policySnapshotJson(revision), 200, { ETag: etag }));
+    const result = await createApiClient(key).activatePolicy(policyDocumentJson, etag, signal);
+    expect(result.status).toBe(200);
+    expect(result.etag).toBe(etag);
+    expect(displayValue(result.data.revision)).toBe(revision);
+    expect(displayValue(result.data.document.rules.impossibleTravel.maxAccuracyKm)).toBe(
+      '0.12345678901234567890123456789',
+    );
+    expect(result.data.document.rules.highAmount.thresholds.ZAR).toBe('25000.00');
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/api/v1/admin/policy', {
+      method: 'PUT',
+      headers: {
+        Accept: 'application/json',
+        'X-API-Key': key,
+        'Content-Type': 'application/json',
+        'If-Match': etag,
+      },
+      cache: 'no-store',
+      credentials: 'omit',
+      redirect: 'error',
+      signal,
+      body: policyDocumentJson,
+    });
+  });
+
+  it.each([
+    '',
+    '*',
+    'W/"policy-revision-1"',
+    '"policy-revision-1", "policy-revision-2"',
+    '"policy-revision-0"',
+    '"policy-revision-01"',
+    '"policy-revision-1.0"',
+    '"policy-revision-9223372036854775808"',
+  ])('does not dispatch activation with invalid precondition %s', async (etag) => {
+    await expect(
+      createApiClient(key).activatePolicy(policyDocumentJson, etag),
+    ).rejects.toMatchObject({ code: 'INVALID_POLICY_ETAG', outcome: undefined });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [412, /active policy changed.*keep your draft/i],
+    [428, /requires the current policy revision.*reload/i],
+  ] as const)(
+    'explains HTTP %s activation preconditions without losing their rejection status',
+    async (status, message) => {
+      fetchMock.mockResolvedValue(response('{}', status));
+      const failure = await createApiClient(key)
+        .activatePolicy(policyDocumentJson, '"policy-revision-1"')
+        .catch((error: unknown) => error);
+      expect(failure).toMatchObject({ status, outcome: 'REJECTED' });
+      expect(String(failure)).toMatch(message);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([500, 503])(
+    'keeps HTTP %s activation failures uncertain with policy-specific recovery guidance',
+    async (status) => {
+      fetchMock.mockResolvedValue(
+        response('{"code":"DEPENDENCY_UNAVAILABLE","outcome":"NOT_ACCEPTED"}', status),
+      );
+      const failure = await createApiClient(key)
+        .activatePolicy(policyDocumentJson, '"policy-revision-1"')
+        .catch((error: unknown) => error);
+      expect(failure).toMatchObject({ status, code: 'POLICY_OUTCOME_UNKNOWN', outcome: 'UNKNOWN' });
+      expect(String(failure)).toMatch(/read the active policy.*revision and hash/i);
+      expect(String(failure)).not.toMatch(/transaction.*replay/i);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    'not JSON',
+    '{}',
+    policySnapshotJson('0'),
+    policySnapshotJson('1.5'),
+    policySnapshotJson('1e3'),
+    policySnapshotJson('9223372036854775808'),
+  ])('does not certify an unreadable activation result or invalid exact revision', async (raw) => {
+    fetchMock.mockResolvedValue(response(raw, 200, { ETag: '"policy-revision-1"' }));
+    await expect(
+      createApiClient(key).activatePolicy(policyDocumentJson, '"policy-revision-1"'),
+    ).rejects.toMatchObject({ code: 'POLICY_OUTCOME_UNKNOWN', outcome: 'UNKNOWN' });
+  });
+
+  it.each([undefined, 'W/"policy-revision-1"', '"policy-revision-2"'])(
+    'rejects a policy snapshot with missing, weak or mismatched ETag: %s',
+    async (etag) => {
+      fetchMock.mockResolvedValue(
+        response(policySnapshotJson(), 200, etag === undefined ? {} : { ETag: etag }),
+      );
+      await expect(createApiClient(key).getEditablePolicy()).rejects.toMatchObject({
+        code: 'INVALID_RESPONSE',
+        outcome: undefined,
+      });
+    },
+  );
+
+  it('does not certify an activation with a missing returned ETag or unexpected success status', async () => {
+    fetchMock
+      .mockResolvedValueOnce(response(policySnapshotJson()))
+      .mockResolvedValueOnce(response(policySnapshotJson(), 202, { ETag: '"policy-revision-1"' }));
+    const client = createApiClient(key);
+    await expect(
+      client.activatePolicy(policyDocumentJson, '"policy-revision-1"'),
+    ).rejects.toMatchObject({ code: 'POLICY_OUTCOME_UNKNOWN', outcome: 'UNKNOWN' });
+    await expect(
+      client.activatePolicy(policyDocumentJson, '"policy-revision-1"'),
+    ).rejects.toMatchObject({ status: 202, outcome: 'UNKNOWN' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps activation network and successful-response-body failures uncertain without leaking diagnostics', async () => {
+    const received = response(policySnapshotJson(), 200, { ETag: '"policy-revision-1"' });
+    vi.spyOn(received, 'text').mockRejectedValue(new TypeError('Synthetic incomplete response'));
+    fetchMock
+      .mockRejectedValueOnce(new TypeError(`Synthetic failed URL https://example.test/${key}`))
+      .mockResolvedValueOnce(received);
+    const client = createApiClient(key);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const failure = await client
+        .activatePolicy(policyDocumentJson, '"policy-revision-1"')
+        .catch((error: unknown) => error);
+      expect(failure).toMatchObject({ code: 'POLICY_OUTCOME_UNKNOWN', outcome: 'UNKNOWN' });
+      expect(String(failure)).not.toContain(key);
+      expect(JSON.stringify(failure)).not.toContain('maxAccuracyKm');
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('distinguishes pre-dispatch activation cancellation from cancellation after dispatch', async () => {
+    const before = new AbortController();
+    before.abort();
+    const client = createApiClient(key);
+    await expect(
+      client.activatePolicy(policyDocumentJson, '"policy-revision-1"', before.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const after = new AbortController();
+    fetchMock.mockImplementation(
+      (_path: string, options: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          options.signal!.addEventListener(
+            'abort',
+            () => reject(new DOMException('Cancelled', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+    const activation = client.activatePolicy(
+      policyDocumentJson,
+      '"policy-revision-1"',
+      after.signal,
+    );
+    const assertion = expect(activation).rejects.toMatchObject({
+      code: 'POLICY_OUTCOME_UNKNOWN',
+      outcome: 'UNKNOWN',
+    });
+    after.abort();
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('preserves authentication callbacks and known rejection headers despite an interrupted activation error body', async () => {
+    const onUnauthorized = vi.fn();
+    const received = response('{}', 401, { 'X-Correlation-ID': 'policy-denied-test' });
+    vi.spyOn(received, 'text').mockRejectedValue(new TypeError('Synthetic interrupted error'));
+    fetchMock.mockResolvedValue(received);
+    await expect(
+      createApiClient(key, { onUnauthorized }).activatePolicy(
+        policyDocumentJson,
+        '"policy-revision-1"',
+      ),
+    ).rejects.toMatchObject({
+      status: 401,
+      outcome: 'REJECTED',
+      correlationId: 'policy-denied-test',
+    });
+    expect(onUnauthorized).toHaveBeenCalledOnce();
+  });
+
+  it('respects policy Retry-After without retrying or labelling a locally blocked request as an activation attempt', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+    const onRateLimit = vi.fn();
+    fetchMock.mockResolvedValue(response('{}', 503, { 'Retry-After': '2' }));
+    const client = createApiClient(key, { onRateLimit });
+    await expect(
+      client.activatePolicy(policyDocumentJson, '"policy-revision-1"'),
+    ).rejects.toMatchObject({ outcome: 'UNKNOWN', retryAt: Date.now() + 2000 });
+    await expect(
+      client.activatePolicy(policyDocumentJson, '"policy-revision-1"'),
+    ).rejects.toMatchObject({ outcome: undefined });
+    expect(onRateLimit).toHaveBeenCalledExactlyOnceWith(Date.now() + 2000);
+    await vi.advanceTimersByTimeAsync(2000);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

@@ -78,8 +78,8 @@ export function AdministratorConnection() {
       </summary>
       <div className="admin-body">
         <p>
-          A separate administrator key can read the complete document, revision and ETag when the
-          backend administration overlay is enabled. This foundation is read-only.
+          Use a separate administrator key to edit, validate and activate policy when administration
+          is enabled. Ordinary API keys keep their existing permissions.
         </p>
         {session.adminClient ? (
           <div className="inline-between">

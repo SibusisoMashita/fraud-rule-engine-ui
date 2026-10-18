@@ -2,7 +2,7 @@
 
 **Fraud Rule Engine — Assessment Demo** is a React and TypeScript interface for the [Fraud Rule Engine Service](https://github.com/SibusisoMashita/fraud-rule-engine-service). It uses the supplied Capitec assets for this assessment presentation.
 
-Submit synthetic transactions, explore five editable scenarios, browse saved evaluations and inspect active policy. Every displayed decision comes from the API. Policy editing follows in the next check-in.
+Submit synthetic transactions, explore five editable scenarios, browse saved evaluations and inspect active policy. Administrators can validate, review and activate policy changes. Every displayed decision comes from the API.
 
 ## Run with Docker
 
@@ -19,7 +19,7 @@ You need Git and Docker with Compose 2.24.4+. On Windows, use Docker Desktop wit
 
 The key stays in memory until you disconnect or reload. The browser sends requests to the UI's own origin; NGINX forwards API calls to the backend's Docker network. PostgreSQL and Redis need no published ports.
 
-For the optional administrator connection, follow the backend's [administrator setup](https://github.com/SibusisoMashita/fraud-rule-engine-service/blob/main/docs/OPERATIONS.md#optional-policy-administration-api) and use its separate `secrets/local-policy-admin-api-key` to inspect the complete policy document and revision. The Policy screen remains read-only.
+For policy editing, follow the backend's optional [administrator setup](https://github.com/SibusisoMashita/fraud-rule-engine-service/blob/main/docs/OPERATIONS.md#optional-policy-administration-api). Connect with your ordinary key first, then open **Policy → Administrator access** and use the separate `secrets/local-policy-admin-api-key`. Administration stays disabled in the ordinary backend quickstart.
 
 Stop the UI with `docker compose down`. This leaves the backend running.
 
@@ -30,6 +30,17 @@ Open **Try transactions** and choose a manual transaction or one of the five sce
 Select a submission to inspect its rule evidence and raw response, replay the retained payload or send a different amount under the same event ID. For an uncertain response, keep that ID and payload and use the explicit recovery actions; [recovery details](docs/ARCHITECTURE.md#submission-and-recovery) explain what retrieval can confirm.
 
 The submission journal stays in memory when you change screens. Disconnecting or reloading clears it, so resolve uncertain submissions before leaving the session.
+
+## Edit policy
+
+1. Connect an administrator and read the current policy. The editor starts from the API's complete document, revision and hash.
+2. Change the rule, currency or event-timing fields, or use **Policy JSON**. Both views share one draft; monetary settings remain quoted decimal strings.
+3. Choose **Validate draft**, then **Review changes**. Any further edit requires validation again.
+4. Review the differences and choose **Activate policy**. Changes apply across the engine to new evaluations without a restart. Saved results and replays keep their original policy.
+
+If another administrator changes the policy, activation stops. **Read current policy** keeps your draft so you can compare it with the new base, validate and review again. If an activation response is lost, read the current policy before deciding what to do; activation never retries automatically. [Recovery details](docs/ARCHITECTURE.md#policy-editing) explain what the comparison can confirm.
+
+Drafts stay in memory across navigation. Disconnecting the administrator, disconnecting the engine or reloading clears them. The backend remains responsible for permissions, validation and revision guards.
 
 ## Change the Docker connection
 
