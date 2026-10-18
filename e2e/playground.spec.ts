@@ -57,8 +57,33 @@ async function connect(page: Page, credential = key) {
   await enterCredential(page, credential);
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Disconnect', exact: true })).toBeVisible();
+  const currencies = page.waitForResponse(isCurrencyRead);
   await page.getByRole('link', { name: 'Try transactions', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Try transactions', exact: true })).toBeVisible();
+  await readyCurrencies(page, await currencies);
+}
+
+function isCurrencyRead(response: Response) {
+  return (
+    response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/v1/rules'
+  );
+}
+
+async function readyCurrencies(page: Page, response: Response) {
+  if (response.status() === 429) {
+    // Independent fast tests share a real quota. Exercise the explicit UI recovery action.
+    await expect(page.getByRole('alert').filter({ hasText: 'RATE_LIMITED' })).toBeVisible();
+    const reload = page.getByRole('button', { name: 'Reload currencies', exact: true });
+    await expect(reload).toBeEnabled();
+    const nextRead = page.waitForResponse(isCurrencyRead);
+    await reload.click();
+    response = await nextRead;
+  }
+  expect(
+    response.status(),
+    'Active currencies must be available before a transaction workflow',
+  ).toBe(200);
+  await expect(page.getByRole('combobox', { name: 'Currency', exact: true })).toBeEnabled();
 }
 
 function nextSubmission(page: Page) {
@@ -68,6 +93,19 @@ function nextSubmission(page: Page) {
 async function newTransaction(page: Page) {
   await page.getByRole('button', { name: 'New transaction', exact: true }).click();
   await page.getByLabel('Amount', { exact: true }).fill('100.10');
+}
+
+async function submitFixture(page: Page, raw: string) {
+  try {
+    return await page.request.post(transactionPath, {
+      headers: { 'X-API-Key': key, 'Content-Type': 'application/json' },
+      data: raw,
+      maxRetries: 0,
+      maxRedirects: 0,
+    });
+  } catch {
+    throw new Error('The real fixture submission failed; credential diagnostics withheld.');
+  }
 }
 
 async function submitted(page: Page, response: Response, status: number) {
@@ -209,16 +247,17 @@ test('playground: a draft prepared before connecting keeps its edited scenario a
   await page.goto('/#transactions');
   const preset = page.getByRole('button', { name: 'Impossible travel', exact: true });
   await preset.click();
-  const eventId = `ui-prepared-${crypto.randomUUID()}`;
+  const eventId = await page.getByLabel('Event ID', { exact: true }).inputValue();
   await page.getByLabel('Amount', { exact: true }).fill('12.34');
-  await page.getByLabel('Event ID', { exact: true }).fill(eventId);
   const customerId = await page.getByLabel('Customer ID', { exact: true }).inputValue();
   const instrumentId = await page.getByLabel('Instrument ID', { exact: true }).inputValue();
   expect(observed.posts).toHaveLength(0);
 
   await enterCredential(page, key);
+  const currencies = page.waitForResponse(isCurrencyRead);
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Disconnect', exact: true })).toBeVisible();
+  await readyCurrencies(page, await currencies);
   await expect(preset).toHaveAttribute('aria-pressed', 'true');
   await expect(
     page.getByRole('group', { name: 'Scenario transactions' }).getByRole('button'),
@@ -252,19 +291,26 @@ test('playground: an instrument ownership conflict explains the customer mismatc
   const observed = observeSubmissions(page);
   await connect(page);
   await newTransaction(page);
-  const originalEventId = await page.getByLabel('Event ID', { exact: true }).inputValue();
-  const originalCustomerId = await page.getByLabel('Customer ID', { exact: true }).inputValue();
-  const instrumentId = await page.getByLabel('Instrument ID', { exact: true }).inputValue();
-  const accepted = nextSubmission(page);
-  await page.getByRole('button', { name: 'Submit transaction', exact: true }).click();
-  await submitted(page, await accepted, 201);
-
-  await newTransaction(page);
   const freshEventId = await page.getByLabel('Event ID', { exact: true }).inputValue();
   const newCustomerId = await page.getByLabel('Customer ID', { exact: true }).inputValue();
-  expect(freshEventId).not.toBe(originalEventId);
-  expect(newCustomerId).not.toBe(originalCustomerId);
-  await page.getByLabel('Instrument ID', { exact: true }).fill(instrumentId);
+  const instrumentId = await page.getByLabel('Instrument ID', { exact: true }).inputValue();
+  // The simplified form owns its IDs. Establish another owner through the actual API.
+  const accepted = await submitFixture(
+    page,
+    JSON.stringify({
+      eventId: `ui-owner-${crypto.randomUUID()}`,
+      customerId: `ui-owner-customer-${crypto.randomUUID()}`,
+      instrumentId,
+      transactionType: 'CARD_PURCHASE',
+      status: 'BOOKED',
+      channel: 'ECOMMERCE',
+      amount: '100.10',
+      currency: 'ZAR',
+      category: 'GROCERIES',
+      occurredAt: new Date().toISOString(),
+    }),
+  );
+  expect(accepted.status()).toBe(201);
   const rejected = nextSubmission(page);
   await page.getByRole('button', { name: 'Submit transaction', exact: true }).click();
   const response = await rejected;
@@ -287,8 +333,8 @@ test('playground: an instrument ownership conflict explains the customer mismatc
   await expect(result.getByRole('heading', { name: 'Outcome unknown', exact: true })).toHaveCount(
     0,
   );
-  expect(observed.posts).toHaveLength(2);
-  expect(observed.posts[1]!.identity).toEqual({
+  expect(observed.posts).toHaveLength(1);
+  expect(observed.posts[0]!.identity).toEqual({
     eventId: freshEventId,
     customerId: newCustomerId,
     instrumentId,
@@ -303,21 +349,21 @@ test('playground: exact decimals, identical replay, retrieval and a conflicting 
   await newTransaction(page);
   await page.getByRole('combobox', { name: 'Channel', exact: true }).selectOption('CARD_PRESENT');
   await page.getByLabel('Include physical location', { exact: true }).check();
-  await page.getByLabel('Latitude', { exact: true }).fill('-33.9249');
-  await page.getByLabel('Longitude', { exact: true }).fill('18.4241');
-  await page.getByLabel('Accuracy (km)', { exact: true }).fill(precision);
   await page
-    .getByRole('combobox', { name: 'Location source', exact: true })
-    .selectOption('VERIFIED_CARD_PRESENT_TERMINAL');
-  await page.getByLabel('City', { exact: true }).fill('Cape Town');
+    .getByRole('combobox', { name: 'Demo location', exact: true })
+    .selectOption('cape-town');
+  await expect(page.getByLabel('Latitude', { exact: true })).toHaveValue('-33.9249');
+  await expect(page.getByLabel('Longitude', { exact: true })).toHaveValue('18.4241');
+  await expect(page.getByLabel('City', { exact: true })).toHaveValue('Cape Town');
+  const accuracy = await page.getByLabel('Accuracy (km)', { exact: true }).inputValue();
   await accessible(page);
   let responsePromise = nextSubmission(page);
   await page.getByRole('button', { name: 'Submit transaction', exact: true }).click();
   const originalResponse = await responsePromise;
   const originalBody = await submitted(page, originalResponse, 201);
   const originalPayload = observed.posts[0]!.request.postData()!;
-  expect(originalPayload).toContain(precision);
-  expect(originalBody).toContain(precision);
+  expect(originalPayload).toContain(`"accuracyKm":${accuracy}`);
+  expect(originalBody.match(/"accuracyKm"\s*:\s*([0-9]+(?:\.[0-9]+)?)/)?.[1]).toBe(accuracy);
   expect((JSON.parse(originalPayload) as { amount: string }).amount).toBe('100.10');
   await accessible(page);
   await preview(page, 'playground-desktop.png');
@@ -354,6 +400,110 @@ test('playground: exact decimals, identical replay, retrieval and a conflicting 
   expect((JSON.parse(observed.posts[2]!.request.postData()!) as { amount: string }).amount).toBe(
     '100.11',
   );
+});
+
+test('playground: generated fields and policy currencies keep a manual ATM keyboard submission consistent', async ({
+  page,
+}) => {
+  const observed = observeSubmissions(page);
+  await connect(page);
+  await newTransaction(page);
+  for (const label of ['Event ID', 'Customer ID', 'Instrument ID', 'Occurred at']) {
+    await expect(page.getByLabel(label, { exact: true })).toHaveAttribute('readonly', '');
+  }
+  const currency = page.getByRole('combobox', { name: 'Currency', exact: true });
+  await expect(currency.locator('option[value="ZAR"]')).toHaveCount(1);
+  const amount = page.getByLabel('Amount', { exact: true });
+  await amount.fill('not-a-number');
+  await expect(amount).not.toHaveValue(/[A-Za-z]/);
+  await amount.fill('100.10');
+  await page
+    .getByRole('combobox', { name: 'Transaction type', exact: true })
+    .selectOption('ATM_WITHDRAWAL');
+  await expect(page.getByRole('combobox', { name: 'Channel', exact: true })).toHaveValue('ATM');
+  await page.getByLabel('Include physical location', { exact: true }).check();
+  await page
+    .getByRole('combobox', { name: 'Demo location', exact: true })
+    .selectOption('johannesburg');
+  for (const label of ['Latitude', 'Longitude', 'Accuracy (km)', 'City', 'Location source']) {
+    await expect(page.getByLabel(label, { exact: true })).toHaveAttribute('readonly', '');
+  }
+  await expect(page.getByLabel('City', { exact: true })).toHaveValue('Johannesburg');
+  await expect(page.getByLabel('Location source', { exact: true })).toHaveValue(
+    'VERIFIED_ATM_TERMINAL',
+  );
+  await amount.fill('.50');
+  const response = nextSubmission(page);
+  await amount.press('Enter');
+  await submitted(page, await response, 201);
+  expect(observed.posts).toHaveLength(1);
+  expect(JSON.parse(observed.posts[0]!.request.postData()!)).toMatchObject({
+    transactionType: 'ATM_WITHDRAWAL',
+    channel: 'ATM',
+    amount: '0.50',
+    currency: 'ZAR',
+    physicalLocation: {
+      latitude: -26.2041,
+      longitude: 28.0473,
+      source: 'VERIFIED_ATM_TERMINAL',
+      city: 'Johannesburg',
+    },
+  });
+});
+
+test('playground: precise external location evidence survives replay and renders exactly in saved details', async ({
+  page,
+}) => {
+  await connect(page);
+  const customerId = `ui-precision-customer-${crypto.randomUUID()}`;
+  const eventId = `ui-precision-event-${crypto.randomUUID()}`;
+  const raw = JSON.stringify({
+    eventId,
+    customerId,
+    instrumentId: `ui-precision-card-${crypto.randomUUID()}`,
+    transactionType: 'CARD_PURCHASE',
+    status: 'BOOKED',
+    channel: 'CARD_PRESENT',
+    amount: '100.10',
+    currency: 'ZAR',
+    category: 'GROCERIES',
+    occurredAt: new Date().toISOString(),
+    physicalLocation: {
+      latitude: -33.9249,
+      longitude: 18.4241,
+      accuracyKm: precision,
+      source: 'VERIFIED_CARD_PRESENT_TERMINAL',
+      city: 'Cape Town',
+    },
+  }).replace(`"${precision}"`, precision);
+  // Deliberately bypass the sample-location form, not the service: external events may be more precise.
+  expect(raw).toContain(`"accuracyKm":${precision}`);
+  const created = await submitFixture(page, raw);
+  expect(created.status()).toBe(201);
+  const original = await created.text();
+  expect(original.match(/"accuracyKm"\s*:\s*([0-9]+(?:\.[0-9]+)?)/)?.[1]).toBe(precision);
+  const replayed = await submitFixture(page, raw);
+  expect(replayed.status()).toBe(200);
+  expect(await replayed.text()).toBe(original);
+
+  await page.getByRole('link', { name: 'Evaluations', exact: true }).click();
+  await page.getByLabel('Customer ID', { exact: true }).fill(customerId);
+  await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+  await expect(page.getByText(eventId, { exact: true })).toBeVisible();
+  const lookup = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === `${transactionPath}/${eventId}`,
+  );
+  await page.getByRole('button', { name: 'View details', exact: true }).click();
+  expect(await (await lookup).text()).toBe(original);
+  const details = page.getByTestId('evaluation-details');
+  await details.getByText('Submitted location', { exact: true }).click();
+  await expect(
+    details.locator('.location-facts').getByText(precision, { exact: true }),
+  ).toBeVisible();
+  await details.getByText('Raw API response', { exact: true }).click();
+  await expect(details.getByLabel('Raw API response', { exact: true })).toContainText(precision);
 });
 
 test('playground: a committed transaction with a lost response stays unknown until explicit identical replay', async ({

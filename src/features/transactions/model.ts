@@ -1,5 +1,14 @@
 import { compareNumber, LosslessNumber, parse, stringify } from 'lossless-json';
 import type { components } from '../../api/generated';
+import locations from './locations.json';
+
+export const demoLocations = locations;
+
+function demoLocation(id: string) {
+  const place = demoLocations.find((candidate) => candidate.id === id);
+  if (!place) throw new Error('A required sample terminal location is missing.');
+  return place;
+}
 
 type TransactionInput = components['schemas']['TransactionInput'];
 type PhysicalLocation = components['schemas']['PhysicalLocation'];
@@ -67,7 +76,37 @@ const DECIMAL = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/;
 const TIMESTAMP =
   /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-](?:0\d|1[0-8]):[0-5]\d)$/;
 
+/** Editing allows unfinished decimals; submission still requires a positive amount. */
+export function isAmountEntry(value: string): boolean {
+  return /^\d{0,16}(?:\.\d{0,4})?$/.test(value);
+}
+
+export function normalizeAmountEntry(value: string): string {
+  return value
+    .replace(/^0+(?=\d)/, '')
+    .replace(/^\./, '0.')
+    .replace(/\.$/, '');
+}
+
+export function isValidAmount(value: string): boolean {
+  return MONEY.test(value) && compareNumber(value, '0') > 0;
+}
+
+/** Start the latest event now without changing historical intervals or identities. */
+export function refreshEventTimes(
+  drafts: TransactionDraft[],
+  now = Date.now(),
+): TransactionDraft[] {
+  drafts.forEach((draft) => timestamp(draft.occurredAt));
+  const latest = Math.max(...drafts.map((draft) => Date.parse(draft.occurredAt)));
+  return drafts.map((draft) => ({
+    ...draft,
+    occurredAt: new Date(Date.parse(draft.occurredAt) + now - latest).toISOString(),
+  }));
+}
+
 export function createManualDraft(): TransactionDraft {
+  const capeTown = demoLocation('cape-town');
   return {
     eventId: `demo-event-${crypto.randomUUID()}`,
     customerId: `demo-customer-${crypto.randomUUID()}`,
@@ -81,11 +120,11 @@ export function createManualDraft(): TransactionDraft {
     occurredAt: new Date().toISOString(),
     locationEnabled: false,
     physicalLocation: {
-      latitude: '-33.9249',
-      longitude: '18.4241',
-      accuracyKm: '1',
+      latitude: capeTown.latitude,
+      longitude: capeTown.longitude,
+      accuracyKm: capeTown.accuracyKm,
       source: 'VERIFIED_CARD_PRESENT_TERMINAL',
-      city: 'Cape Town',
+      city: capeTown.city,
     },
   };
 }
@@ -119,13 +158,15 @@ export function createScenarioDraft(id: ScenarioId): ScenarioDraft {
       capeTown.channel = 'CARD_PRESENT';
       capeTown.locationEnabled = true;
       const johannesburg = event('10.00', 0);
+      const destination = demoLocation('johannesburg');
       johannesburg.channel = 'CARD_PRESENT';
       johannesburg.locationEnabled = true;
       johannesburg.physicalLocation = {
         ...johannesburg.physicalLocation,
-        latitude: '-26.2041',
-        longitude: '28.0473',
-        city: 'Johannesburg',
+        latitude: destination.latitude,
+        longitude: destination.longitude,
+        accuracyKm: destination.accuracyKm,
+        city: destination.city,
       };
       transactions = [capeTown, johannesburg];
       break;
@@ -173,7 +214,7 @@ function decimal(value: string, name: string, minimum: string, maximum?: string)
 
 function validateAmount(amount: string) {
   requireValue(
-    MONEY.test(amount) && compareNumber(amount, '0') > 0,
+    isValidAmount(amount),
     'Amount must be a positive decimal string, with up to 16 whole digits and four fractional digits.',
   );
 }

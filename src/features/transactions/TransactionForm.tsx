@@ -1,79 +1,86 @@
-import type { TransactionDraft } from './model';
+import { AmountInput } from './AmountInput';
+import { demoLocations, type TransactionDraft } from './model';
 
 export function TransactionForm({
   draft,
   onChange,
   disabled,
+  currencies,
+  loadingCurrencies,
 }: {
   draft: TransactionDraft;
   onChange: (draft: TransactionDraft) => void;
   disabled: boolean;
+  currencies: string[];
+  loadingCurrencies: boolean;
 }) {
   function field<Key extends keyof TransactionDraft>(key: Key, value: TransactionDraft[Key]) {
     onChange({ ...draft, [key]: value });
   }
-  function location(key: keyof TransactionDraft['physicalLocation'], value: string) {
-    onChange({ ...draft, physicalLocation: { ...draft.physicalLocation, [key]: value } });
+  function channel(value: TransactionDraft['channel'], type = draft.transactionType) {
+    onChange({
+      ...draft,
+      transactionType: type,
+      channel: value,
+      locationEnabled: value !== 'ECOMMERCE' && draft.locationEnabled,
+      physicalLocation: {
+        ...draft.physicalLocation,
+        source: value === 'ATM' ? 'VERIFIED_ATM_TERMINAL' : 'VERIFIED_CARD_PRESENT_TERMINAL',
+      },
+    });
   }
+  const selectedLocation = demoLocations.find(
+    (place) =>
+      place.latitude === draft.physicalLocation.latitude &&
+      place.longitude === draft.physicalLocation.longitude,
+  );
   return (
     <fieldset className="transaction-fields" disabled={disabled}>
       <legend>Transaction fields</legend>
       <div className="transaction-grid">
-        <label>
-          Amount
-          <input
-            name="amount"
-            inputMode="decimal"
-            value={draft.amount}
-            onChange={(event) => field('amount', event.target.value)}
-            required
-            maxLength={128}
-          />
-        </label>
+        <AmountInput
+          label="Amount"
+          value={draft.amount}
+          onChange={(value) => field('amount', value)}
+        />
         <label>
           Currency
-          <input
-            name="currency"
-            value={draft.currency}
+          <select
+            value={currencies.includes(draft.currency) ? draft.currency : ''}
             onChange={(event) => field('currency', event.target.value)}
             required
-            maxLength={3}
-          />
+            disabled={loadingCurrencies || currencies.length === 0}
+          >
+            <option value="" disabled>
+              {loadingCurrencies ? 'Loading currencies…' : 'Choose an active currency'}
+            </option>
+            {currencies.map((code) => (
+              <option key={code} value={code}>
+                {code}
+              </option>
+            ))}
+          </select>
         </label>
         <label>
           Event ID
-          <input
-            value={draft.eventId}
-            onChange={(event) => field('eventId', event.target.value)}
-            required
-            maxLength={128}
-          />
+          <input value={draft.eventId} readOnly />
         </label>
         <label>
           Customer ID
-          <input
-            value={draft.customerId}
-            onChange={(event) => field('customerId', event.target.value)}
-            required
-            maxLength={128}
-          />
+          <input value={draft.customerId} readOnly />
         </label>
         <label>
           Instrument ID
-          <input
-            value={draft.instrumentId}
-            onChange={(event) => field('instrumentId', event.target.value)}
-            required
-            maxLength={128}
-          />
+          <input value={draft.instrumentId} readOnly />
         </label>
         <label>
           Transaction type
           <select
             value={draft.transactionType}
-            onChange={(event) =>
-              field('transactionType', event.target.value as TransactionDraft['transactionType'])
-            }
+            onChange={(event) => {
+              const type = event.target.value as TransactionDraft['transactionType'];
+              channel(type === 'ATM_WITHDRAWAL' ? 'ATM' : 'ECOMMERCE', type);
+            }}
           >
             <option value="CARD_PURCHASE">Card purchase</option>
             <option value="ATM_WITHDRAWAL">ATM withdrawal</option>
@@ -81,24 +88,22 @@ export function TransactionForm({
         </label>
         <label>
           Status
-          <select
-            value={draft.status}
-            onChange={(event) => field('status', event.target.value as TransactionDraft['status'])}
-          >
-            <option value="BOOKED">Booked</option>
-          </select>
+          <input value="Booked" readOnly />
         </label>
         <label>
           Channel
           <select
             value={draft.channel}
-            onChange={(event) =>
-              field('channel', event.target.value as TransactionDraft['channel'])
-            }
+            onChange={(event) => channel(event.target.value as TransactionDraft['channel'])}
           >
-            <option value="ECOMMERCE">Ecommerce</option>
-            <option value="CARD_PRESENT">Card present</option>
-            <option value="ATM">ATM</option>
+            {draft.transactionType === 'ATM_WITHDRAWAL' ? (
+              <option value="ATM">ATM</option>
+            ) : (
+              <>
+                <option value="ECOMMERCE">Ecommerce</option>
+                <option value="CARD_PRESENT">Card present</option>
+              </>
+            )}
           </select>
         </label>
         <label>
@@ -112,78 +117,103 @@ export function TransactionForm({
         </label>
         <label className="wide-field">
           Occurred at
-          <input
-            value={draft.occurredAt}
-            onChange={(event) => field('occurredAt', event.target.value)}
-            placeholder="ISO timestamp including Z or an offset"
-            required
-            maxLength={40}
-          />
+          <input value={draft.occurredAt} readOnly aria-describedby="event-time-help" />
         </label>
       </div>
+      <p id="event-time-help" className="muted">
+        IDs are generated for each new run. Times are set when sending; scenarios keep their
+        original time gaps.
+      </p>
       <label className="checkbox-label">
         <input
           type="checkbox"
           checked={draft.locationEnabled}
+          disabled={draft.channel === 'ECOMMERCE'}
           onChange={(event) => field('locationEnabled', event.target.checked)}
         />
         Include physical location
       </label>
+      {draft.channel === 'ECOMMERCE' && (
+        <p className="muted">
+          Physical location is available for card-present purchases and ATM withdrawals.
+        </p>
+      )}
       {draft.locationEnabled && (
-        <div className="transaction-grid location-fields">
+        <>
           <label>
-            Latitude
-            <input
-              inputMode="decimal"
-              value={draft.physicalLocation.latitude}
-              onChange={(event) => location('latitude', event.target.value)}
-              required
-              maxLength={128}
-            />
-          </label>
-          <label>
-            Longitude
-            <input
-              inputMode="decimal"
-              value={draft.physicalLocation.longitude}
-              onChange={(event) => location('longitude', event.target.value)}
-              required
-              maxLength={128}
-            />
-          </label>
-          <label>
-            Accuracy (km)
-            <input
-              inputMode="decimal"
-              value={draft.physicalLocation.accuracyKm}
-              onChange={(event) => location('accuracyKm', event.target.value)}
-              required
-              maxLength={128}
-            />
-          </label>
-          <label>
-            Location source
+            Demo location
             <select
-              value={draft.physicalLocation.source}
-              onChange={(event) => location('source', event.target.value)}
+              value={selectedLocation?.id ?? ''}
+              onChange={(event) => {
+                const place = demoLocations.find(
+                  (candidate) => candidate.id === event.target.value,
+                );
+                if (place)
+                  onChange({
+                    ...draft,
+                    physicalLocation: {
+                      latitude: place.latitude,
+                      longitude: place.longitude,
+                      accuracyKm: place.accuracyKm,
+                      city: place.city,
+                      source: draft.physicalLocation.source,
+                    },
+                  });
+              }}
             >
-              <option value="VERIFIED_CARD_PRESENT_TERMINAL">Verified card terminal</option>
-              <option value="VERIFIED_ATM_TERMINAL">Verified ATM terminal</option>
+              <option value="" disabled>
+                Choose a location
+              </option>
+              {demoLocations.map((place) => (
+                <option key={place.id} value={place.id}>
+                  {place.city}
+                </option>
+              ))}
             </select>
           </label>
-          <label>
-            City
-            <input
-              value={draft.physicalLocation.city}
-              onChange={(event) => location('city', event.target.value)}
-              maxLength={128}
-            />
-          </label>
-        </div>
+          {selectedLocation && (
+            <p>
+              <a
+                className="button secondary"
+                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${selectedLocation.latitude},${selectedLocation.longitude}`)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                View on Google Maps<span className="sr-only"> (opens a new tab)</span>
+              </a>
+            </p>
+          )}
+          <div className="transaction-grid location-fields">
+            <label>
+              Latitude
+              <input value={draft.physicalLocation.latitude} readOnly />
+            </label>
+            <label>
+              Longitude
+              <input value={draft.physicalLocation.longitude} readOnly />
+            </label>
+            <label>
+              Accuracy (km)
+              <input value={draft.physicalLocation.accuracyKm} readOnly />
+            </label>
+            <label>
+              Location source
+              <input value={draft.physicalLocation.source} readOnly />
+            </label>
+            <label>
+              City
+              <input value={draft.physicalLocation.city} readOnly />
+            </label>
+          </div>
+          <p className="muted">
+            These sample coordinates represent synthetic terminal evidence. Google Maps opens a
+            reference view in a new tab; it does not change the transaction location.
+          </p>
+        </>
       )}
       <p className="muted">
-        Amounts and coordinates keep the exact text you enter. The API validates the event,
-        permissions and active policy.
+        Amounts stay exact decimal strings. The API validates the event, permissions and active
+        policy.
       </p>
     </fieldset>
   );

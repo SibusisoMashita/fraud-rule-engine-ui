@@ -1529,6 +1529,10 @@ summary {
   font-size: 13px;
   color: var(--brand-dark);
 }
+.transaction-fields input[readonly] {
+  background: var(--brand-light);
+  color: var(--muted);
+}
 .transaction-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

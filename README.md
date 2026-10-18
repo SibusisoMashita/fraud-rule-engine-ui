@@ -31,6 +31,8 @@ Select a submission to inspect its rule evidence and raw response, replay the re
 
 The submission journal stays in memory when you change screens. Disconnecting or reloading clears it, so resolve uncertain submissions before leaving the session.
 
+Amounts accept digits and a decimal point, and currencies come from active policy. IDs are generated and read-only. Event times are set when a run starts, keeping the gaps between scenario steps. Choose a sample terminal location to fill its read-only coordinates. **View on Google Maps** opens a reference in a new tab; it needs no API key and does not import or change the stored location.
+
 ## Edit policy
 
 1. Connect an administrator and read the current policy. The editor starts from the API's complete document, revision and hash.

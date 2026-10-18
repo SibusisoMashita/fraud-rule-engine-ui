@@ -22,7 +22,11 @@ Money remains a string. JSON evidence numbers use lossless parsing and retain th
 
 ## Submission and recovery
 
-The playground serializes each edited draft before dispatch and retains that exact payload. An identical replay uses the retained text, including its original timestamp and event ID. A conflicting duplicate changes only the amount, using exact decimal comparison to reject equivalent values such as `100.00` and `100.0`.
+The playground generates read-only event, customer and instrument IDs. Amount inputs accept plain decimal text, keeping money as a string. The currency dropdown reads the complete currency map from active high-amount settings, including when that rule is disabled; backend validation still enforces currency scale and maximum. Reloading currencies is explicit, and a failed read does not invent fallback options.
+
+When a run starts, its latest event is set to now and every earlier event shifts by the same interval. This keeps scenario timing intact without editable timestamps. The playground then serializes each draft and retains that exact payload. An identical replay uses the retained text, including its timestamp and event ID. A conflicting duplicate changes only the amount, using exact decimal comparison to reject equivalent values such as `100.00` and `100.0`.
+
+Sample terminal locations live in one bundled JSON fixture. Selection fills read-only coordinates, city and accuracy; the source follows the physical channel. These are synthetic producer assertions, not verified real terminal observations. A Google Maps URL opens the selected coordinates for reference only. No Maps SDK, API key, geocoding response or external asset is loaded into the application.
 
 Each scenario sends one transaction at a time and stops on failure or an unknown outcome. A timeout, cancellation or unreadable write response may follow a commit. The UI keeps this uncertainty visible and leaves retrieval and replay to the user.
 

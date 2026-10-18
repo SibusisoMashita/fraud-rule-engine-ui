@@ -6,6 +6,8 @@ import {
   createManualDraft,
   createScenarioDraft,
   serializeDraft,
+  refreshEventTimes,
+  normalizeAmountEntry,
   type ScenarioDraft,
   type ScenarioId,
   type TransactionDraft,
@@ -132,8 +134,13 @@ function usePlaygroundState() {
   async function run() {
     if (started || unresolved) return;
     let prepared: Submission[];
+    let transactions: TransactionDraft[];
     try {
-      prepared = plan.transactions.map((draft, index) => {
+      transactions = refreshEventTimes(plan.transactions).map((draft) => ({
+        ...draft,
+        amount: normalizeAmountEntry(draft.amount),
+      }));
+      prepared = transactions.map((draft, index) => {
         try {
           return {
             id: crypto.randomUUID(),
@@ -154,6 +161,7 @@ function usePlaygroundState() {
     }
     const request = begin();
     if (!request) return;
+    setPlan((previous) => ({ ...previous, transactions }));
     setStarted(true);
     setValidation('');
     try {
@@ -185,7 +193,7 @@ function usePlaygroundState() {
     if (!selected?.saved || unresolved) return;
     let raw: string;
     try {
-      raw = conflictingPayload(selected.raw, amount.trim());
+      raw = conflictingPayload(selected.raw, normalizeAmountEntry(amount.trim()));
     } catch (error) {
       setValidation(error instanceof Error ? error.message : 'Check the conflicting amount.');
       return;

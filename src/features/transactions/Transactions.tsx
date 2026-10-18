@@ -7,6 +7,9 @@ import { TransactionResult } from '../../shared/TransactionResult';
 import { scenarioPresets } from './model';
 import { usePlayground, type Submission } from './playground';
 import { TransactionForm } from './TransactionForm';
+import { AmountInput } from './AmountInput';
+import { useCurrencies } from './currencies';
+import { usePolicyEditor } from '../policy/editor';
 
 function outcome(item: Submission) {
   if (item.outcome === 'UNKNOWN') return item.saved ? 'Replay response unknown' : 'Outcome unknown';
@@ -17,12 +20,22 @@ function outcome(item: Submission) {
 
 export function Transactions() {
   const { client, retryAt } = useSession();
+  const { snapshot } = usePolicyEditor();
+  const currencies = useCurrencies(client, snapshot?.data.policyHash);
   const playground = usePlayground();
   const seconds = useRetrySeconds(retryAt);
   const [conflictAmount, setConflictAmount] = useState('');
   useEffect(() => () => playground.stop(), []);
   const { plan, selected, busy, started } = playground;
   const blocked = !client || busy || seconds > 0;
+  const unsupportedSteps =
+    currencies.currencies.length > 0
+      ? plan.transactions.flatMap((draft, index) =>
+          currencies.currencies.includes(draft.currency) ? [] : [index + 1],
+        )
+      : [];
+  const currencyUnavailable =
+    currencies.loading || currencies.currencies.length === 0 || unsupportedSteps.length > 0;
   const result = selected?.retrieved ?? selected?.saved;
 
   return (
@@ -107,7 +120,26 @@ export function Transactions() {
             ))}
           </div>
         )}
+        <div className="editor-actions">
+          <p className="muted">Currencies come from the engine’s active policy.</p>
+          <button
+            type="button"
+            className="button secondary"
+            disabled={!client || busy || currencies.loading || seconds > 0}
+            onClick={currencies.reload}
+          >
+            Reload currencies
+          </button>
+        </div>
+        {currencies.error != null && <Failure error={currencies.error} />}
+        {unsupportedSteps.length > 0 && !started && (
+          <p role="status" className="field-error">
+            Choose an active currency for transaction steps {unsupportedSteps.join(', ')} before
+            sending.
+          </p>
+        )}
         <form
+          noValidate
           onSubmit={(event) => {
             event.preventDefault();
             void playground.run();
@@ -116,6 +148,8 @@ export function Transactions() {
           <TransactionForm
             draft={plan.transactions[playground.editing]}
             disabled={busy || started}
+            currencies={currencies.currencies}
+            loadingCurrencies={currencies.loading}
             onChange={playground.edit}
           />
           {playground.validation && !started && (
@@ -146,7 +180,7 @@ export function Transactions() {
               ) : null}
               <button
                 className="button primary"
-                disabled={blocked || started || playground.unresolved}
+                disabled={blocked || currencyUnavailable || started || playground.unresolved}
               >
                 {busy ? 'Sending…' : plan.id === 'MANUAL' ? 'Submit transaction' : 'Run scenario'}
                 <Icon name="arrow" />
@@ -233,23 +267,19 @@ export function Transactions() {
           {selected.saved && (
             <form
               className="conflict-form"
+              noValidate
               onSubmit={(event) => {
                 event.preventDefault();
                 void playground.conflict(conflictAmount);
               }}
             >
-              <label>
-                Conflicting amount
-                <input
-                  inputMode="decimal"
-                  value={conflictAmount}
-                  onChange={(event) => setConflictAmount(event.target.value)}
-                  required
-                  maxLength={128}
-                  placeholder="A different amount"
-                  disabled={blocked || playground.unresolved}
-                />
-              </label>
+              <AmountInput
+                label="Conflicting amount"
+                value={conflictAmount}
+                onChange={setConflictAmount}
+                placeholder="A different amount"
+                disabled={blocked || playground.unresolved}
+              />
               <button
                 className="button secondary"
                 disabled={blocked || playground.unresolved || !conflictAmount.trim()}

@@ -5,7 +5,6 @@ import { App } from '../../app/App';
 
 const key = 'workflow.synthetic-test-key';
 const precision = '0.12345678901234567890123456789';
-const eventId = 'workflow-event-one';
 const hash = 'a'.repeat(64);
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -25,7 +24,22 @@ function resource(raw: string) {
 
 function defaultRead(path: string) {
   if (path.startsWith('/api/v1/evaluations')) return Promise.resolve(json('{"items":[]}'));
-  if (path === '/api/v1/rules') return Promise.resolve(json(`{"policyHash":"${hash}","rules":[]}`));
+  if (path === '/api/v1/rules')
+    return Promise.resolve(
+      json(
+        JSON.stringify({
+          policyHash: hash,
+          rules: [
+            {
+              ruleId: 'HIGH_AMOUNT',
+              algorithmVersion: '1',
+              enabled: true,
+              settings: { enabled: true, thresholds: { ZAR: '25000.00', USD: '1500.00' } },
+            },
+          ],
+        }),
+      ),
+    );
   return Promise.resolve(json('{"code":"NOT_FOUND","correlationId":"workflow-not-found"}', 404));
 }
 
@@ -53,6 +67,7 @@ async function start(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText('API key', { exact: true }), key);
   await user.click(screen.getByRole('button', { name: 'Connect' }));
   await screen.findByRole('button', { name: 'Disconnect' });
+  await screen.findByRole('option', { name: 'ZAR' });
 }
 
 async function replace(user: ReturnType<typeof userEvent.setup>, label: string, value: string) {
@@ -62,8 +77,8 @@ async function replace(user: ReturnType<typeof userEvent.setup>, label: string, 
 }
 
 async function manual(user: ReturnType<typeof userEvent.setup>, amount = '1234.50') {
-  await replace(user, 'Event ID', eventId);
   await replace(user, 'Amount', amount);
+  return screen.getByLabelText<HTMLInputElement>('Event ID', { exact: true }).value;
 }
 
 function result() {
@@ -71,7 +86,167 @@ function result() {
 }
 
 describe('transaction playground workflows', () => {
-  it('submits string money and precise coordinates, then shows actual create, replay and conflicting-duplicate responses', async () => {
+  it('normalizes decimal entry on Enter just as on blur and retains exact replay text', async () => {
+    const user = userEvent.setup();
+    fetchMock.mockImplementation((path: string, options: RequestInit) => {
+      if (options.method !== 'POST') return defaultRead(path);
+      return Promise.resolve(
+        posts().length === 2
+          ? json('{"code":"EVENT_CONTENT_CONFLICT"}', 409)
+          : json(resource(options.body as string), posts().length === 1 ? 201 : 200),
+      );
+    });
+    await start(user);
+    await manual(user, '.50');
+    await user.keyboard('{Enter}');
+    await result().findByRole('heading', { name: 'Saved' });
+    const original = posts()[0][1].body;
+    expect(original).toContain('"amount":"0.50"');
+    await user.type(screen.getByLabelText('Conflicting amount', { exact: true }), '000.51');
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(posts()).toHaveLength(2));
+    await result().findByRole('heading', { name: 'Rejected' });
+    expect(posts()[1][1].body).toContain('"amount":"0.51"');
+    await user.click(screen.getByRole('button', { name: /^View submission 1:/ }));
+    await user.click(screen.getByRole('button', { name: 'Replay identical payload' }));
+    await waitFor(() => expect(posts()).toHaveLength(3));
+    expect(posts()[2][1].body).toBe(original);
+  });
+
+  it('identifies every step needing a newly supported currency without silently changing money', async () => {
+    const user = userEvent.setup();
+    await start(user);
+    await user.click(screen.getByRole('button', { name: 'Cumulative spend' }));
+    fetchMock.mockImplementation((path: string) =>
+      path === '/api/v1/rules'
+        ? Promise.resolve(
+            json(
+              JSON.stringify({
+                policyHash: 'b'.repeat(64),
+                rules: [
+                  {
+                    ruleId: 'HIGH_AMOUNT',
+                    algorithmVersion: '1',
+                    enabled: false,
+                    settings: { thresholds: { USD: '1000.00' } },
+                  },
+                ],
+              }),
+            ),
+          )
+        : defaultRead(path),
+    );
+    await user.click(screen.getByRole('button', { name: 'Reload currencies' }));
+    await screen.findByText('Choose an active currency for transaction steps 1, 2 before sending.');
+    expect(screen.getByRole('button', { name: 'Run scenario' })).toBeDisabled();
+    await user.selectOptions(screen.getByLabelText('Currency', { exact: true }), 'USD');
+    expect(
+      screen.getByText('Choose an active currency for transaction steps 2 before sending.'),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Edit transaction 2:/ }));
+    await user.selectOptions(screen.getByLabelText('Currency', { exact: true }), 'USD');
+    expect(screen.getByLabelText('Amount', { exact: true })).toHaveValue('16000.00');
+    expect(screen.getByRole('button', { name: 'Run scenario' })).toBeEnabled();
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('uses backend currency choices and keeps generated identity fields read-only until a new run', async () => {
+    const user = userEvent.setup();
+    await start(user);
+    const currency = screen.getByRole('combobox', { name: 'Currency' });
+    const choices = within(currency)
+      .getAllByRole('option')
+      .map((option) => (option as HTMLOptionElement).value)
+      .filter(Boolean);
+    expect(choices).toEqual(['USD', 'ZAR']);
+    const identity = ['Event ID', 'Customer ID', 'Instrument ID'].map((label) => {
+      const input = screen.getByLabelText<HTMLInputElement>(label, { exact: true });
+      expect(input).toHaveProperty('readOnly', true);
+      return input.value;
+    });
+    expect(screen.getByLabelText('Occurred at', { exact: true })).toHaveProperty('readOnly', true);
+    await manual(user, '123.45');
+    await user.selectOptions(currency, 'USD');
+    await replace(user, 'Category', 'TRAVEL');
+    for (const [index, label] of ['Event ID', 'Customer ID', 'Instrument ID'].entries()) {
+      expect(screen.getByLabelText(label, { exact: true })).toHaveValue(identity[index]);
+    }
+    await user.click(screen.getByRole('button', { name: 'New transaction' }));
+    for (const [index, label] of ['Event ID', 'Customer ID', 'Instrument ID'].entries()) {
+      expect(screen.getByLabelText(label, { exact: true })).not.toHaveValue(identity[index]);
+    }
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('accepts exact plain decimal amounts and rejects pasted letters, exponents and signs', async () => {
+    const user = userEvent.setup();
+    await start(user);
+    const amount = screen.getByLabelText('Amount', { exact: true });
+    expect(amount).toHaveAttribute('type', 'text');
+    expect(amount).toHaveAttribute('inputmode', 'decimal');
+    await user.clear(amount);
+    for (const invalid of ['letters', '1e3', '1E3', '-1', '+1', '1.2.3']) {
+      await user.click(amount);
+      await user.paste(invalid);
+      expect(amount).toHaveValue('');
+    }
+    await user.paste('9007199254740993.9999');
+    expect(amount).toHaveValue('9007199254740993.9999');
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('selects sample real coordinates and keeps location fields locked to the chosen physical channel', async () => {
+    const user = userEvent.setup();
+    await start(user);
+    expect(screen.getByLabelText('Include physical location', { exact: true })).toBeDisabled();
+    await user.selectOptions(screen.getByLabelText('Channel', { exact: true }), 'CARD_PRESENT');
+    await user.click(screen.getByLabelText('Include physical location', { exact: true }));
+    await user.selectOptions(
+      screen.getByLabelText('Demo location', { exact: true }),
+      'johannesburg',
+    );
+    for (const [label, value] of [
+      ['Latitude', '-26.2041'],
+      ['Longitude', '28.0473'],
+      ['City', 'Johannesburg'],
+    ]) {
+      const input = screen.getByLabelText(label, { exact: true });
+      expect(input).toHaveValue(value);
+      expect(input).toHaveProperty('readOnly', true);
+    }
+    expect(screen.getByLabelText('Accuracy (km)', { exact: true })).toHaveProperty(
+      'readOnly',
+      true,
+    );
+    const source = screen.getByLabelText('Location source', { exact: true });
+    expect(source.matches('[readonly], :disabled')).toBe(true);
+    const map = screen.getByRole('link', { name: /View on Google Maps/ });
+    expect(map).toHaveAttribute(
+      'href',
+      'https://www.google.com/maps/search/?api=1&query=-26.2041%2C28.0473',
+    );
+    expect(map).toHaveAttribute('target', '_blank');
+    expect(map).toHaveAttribute('rel', 'noopener noreferrer');
+    await user.selectOptions(
+      screen.getByLabelText('Transaction type', { exact: true }),
+      'ATM_WITHDRAWAL',
+    );
+    expect(screen.getByLabelText('Channel', { exact: true })).toHaveValue('ATM');
+    expect(
+      within(screen.getByLabelText('Channel', { exact: true })).getAllByRole('option'),
+    ).toHaveLength(1);
+    await user.selectOptions(
+      screen.getByLabelText('Transaction type', { exact: true }),
+      'CARD_PURCHASE',
+    );
+    expect(screen.getByLabelText('Channel', { exact: true })).toHaveValue('ECOMMERCE');
+    expect(screen.getByLabelText('Transaction type', { exact: true })).toHaveValue('CARD_PURCHASE');
+    expect(screen.getByLabelText('Include physical location', { exact: true })).toBeDisabled();
+    expect(screen.queryByLabelText('Demo location', { exact: true })).toBeNull();
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('submits string money and selected real coordinates, then preserves precise evidence through replay and conflicting-duplicate responses', async () => {
     const user = userEvent.setup();
     let count = 0;
     fetchMock.mockImplementation((path: string, options: RequestInit) => {
@@ -84,19 +259,19 @@ describe('transaction playground workflows', () => {
       );
     });
     await start(user);
-    await manual(user);
+    const eventId = await manual(user);
     await user.selectOptions(screen.getByLabelText('Channel', { exact: true }), 'CARD_PRESENT');
     await user.click(screen.getByLabelText('Include physical location', { exact: true }));
-    await replace(user, 'Accuracy (km)', precision);
-    await replace(user, 'Latitude', '-33.92490000000000000000000000001');
+    await user.selectOptions(screen.getByLabelText('Demo location', { exact: true }), 'cape-town');
     await user.click(screen.getByRole('button', { name: 'Submit transaction' }));
     await result().findByText('HTTP 201', { exact: true });
     const original = posts()[0][1].body;
     expect(original).toContain('"amount":"1234.50"');
-    expect(original).toContain(`"accuracyKm":${precision}`);
-    expect(original).toContain('"latitude":-33.92490000000000000000000000001');
+    expect(original).toContain('"latitude":-33.9249');
+    expect(original).toContain('"longitude":18.4241');
     expect(JSON.parse(original).amount).toBe('1234.50');
     expect(result().getByText('ZAR 1234.50', { exact: true })).toBeInTheDocument();
+    expect(result().getByText(precision, { exact: true })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Replay identical payload' }));
     await result().findByText('HTTP 200', { exact: true });
     expect(posts()[1][1].body).toBe(original);
@@ -184,7 +359,7 @@ describe('transaction playground workflows', () => {
     expect(secondStep).toHaveAccessibleName(/ZAR 16000\.00$/);
     expect(secondStep).toHaveTextContent('ZAR 16000.00');
     await user.click(secondStep);
-    await replace(user, 'Amount', '-1');
+    await replace(user, 'Amount', '0');
     await user.click(screen.getByRole('button', { name: /^Edit transaction 1:/ }));
     await user.click(screen.getByRole('button', { name: 'Run scenario' }));
     expect(screen.getByRole('alert')).toHaveTextContent(/positive decimal/i);
@@ -192,8 +367,48 @@ describe('transaction playground workflows', () => {
     expect(screen.queryByRole('list', { name: 'Submission history' })).not.toBeInTheDocument();
   });
 
+  it('refreshes scenario times once at submission while preserving history spacing, IDs and replay payloads', async () => {
+    const user = userEvent.setup();
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    fetchMock.mockImplementation((path: string, options: RequestInit) =>
+      options.method === 'POST'
+        ? Promise.resolve(json(resource(options.body as string), 201))
+        : defaultRead(path),
+    );
+    await start(user);
+    await user.click(screen.getByRole('button', { name: 'Small payment burst' }));
+    const firstId = screen.getByLabelText<HTMLInputElement>('Event ID', { exact: true }).value;
+    const draftTime = screen.getByLabelText<HTMLInputElement>('Occurred at', { exact: true }).value;
+    now += 3_600_000;
+    await user.click(screen.getByRole('button', { name: 'Run scenario' }));
+    await waitFor(() => expect(posts()).toHaveLength(4));
+    await result().findByRole('heading', { name: 'Saved' });
+    const events = posts().map(
+      ([, options]) =>
+        JSON.parse(options.body) as {
+          eventId: string;
+          occurredAt: string;
+        },
+    );
+    expect(events[0].eventId).toBe(firstId);
+    expect(events[0].occurredAt).not.toBe(draftTime);
+    expect(events.map((event) => Date.parse(event.occurredAt))).toEqual([
+      now - 180_000,
+      now - 120_000,
+      now - 60_000,
+      now,
+    ]);
+    const retained = posts()[3][1].body;
+    now += 3_600_000;
+    await user.click(screen.getByRole('button', { name: 'Replay identical payload' }));
+    await waitFor(() => expect(posts()).toHaveLength(5));
+    expect(posts()[4][1].body).toBe(retained);
+  });
+
   it('retains an uncertain payload through 404 and a found result, resolving identity only after explicit identical replay', async () => {
     const user = userEvent.setup();
+    let eventId = '';
     let retained = '';
     let getCount = 0;
     fetchMock.mockImplementation((path: string, options: RequestInit) => {
@@ -213,7 +428,7 @@ describe('transaction playground workflows', () => {
       return defaultRead(path);
     });
     await start(user);
-    await manual(user);
+    eventId = await manual(user);
     await user.click(screen.getByRole('button', { name: 'Submit transaction' }));
     await result().findByRole('heading', { name: 'Outcome unknown' });
     expect(screen.getByLabelText('Event ID', { exact: true })).toHaveValue(eventId);
@@ -250,7 +465,7 @@ describe('transaction playground workflows', () => {
       });
     });
     await start(user);
-    await manual(user);
+    const eventId = await manual(user);
     await user.click(screen.getByRole('button', { name: 'Submit transaction' }));
     await waitFor(() => expect(posts()).toHaveLength(1));
     const retained = posts()[0][1].body;
@@ -325,8 +540,9 @@ describe('transaction playground workflows', () => {
     expect(posts()).toHaveLength(1);
   });
 
-  it('retains an uncertain custom ID payload when retrieval finds different content, until an explicit replay returns 409', async () => {
+  it('retains an uncertain generated ID payload when retrieval finds different content, until an explicit replay returns 409', async () => {
     const user = userEvent.setup();
+    let eventId = '';
     let retained = '';
     fetchMock.mockImplementation((path: string, options: RequestInit) => {
       if (options.method === 'POST') {
@@ -343,7 +559,7 @@ describe('transaction playground workflows', () => {
       return defaultRead(path);
     });
     await start(user);
-    await manual(user, '1234.50');
+    eventId = await manual(user, '1234.50');
     await user.click(screen.getByRole('button', { name: 'Submit transaction' }));
     await result().findByRole('heading', { name: 'Outcome unknown' });
     await user.click(screen.getByRole('button', { name: 'Retrieve saved result' }));
@@ -372,7 +588,7 @@ describe('transaction playground workflows', () => {
       });
     });
     await start(user);
-    await manual(user);
+    const eventId = await manual(user);
     await user.click(screen.getByRole('button', { name: 'Submit transaction' }));
     await waitFor(() => expect(posts()).toHaveLength(1));
     const raw = posts()[0][1].body;

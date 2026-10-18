@@ -1,0 +1,16 @@
+[
+  {
+    "id": "cape-town",
+    "city": "Cape Town",
+    "latitude": "-33.9249",
+    "longitude": "18.4241",
+    "accuracyKm": "1"
+  },
+  {
+    "id": "johannesburg",
+    "city": "Johannesburg",
+    "latitude": "-26.2041",
+    "longitude": "28.0473",
+    "accuracyKm": "1"
+  }
+]

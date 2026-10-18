@@ -39,7 +39,10 @@ const rulesJson = JSON.stringify({
     ruleId,
     algorithmVersion: '1',
     enabled: true,
-    settings: { enabled: true },
+    settings:
+      ruleId === 'HIGH_AMOUNT'
+        ? { enabled: true, thresholds: { ZAR: '25000.00', USD: '1500.00' } }
+        : { enabled: true },
   })),
 });
 const administratorJson = `{"revision":9223372036854775807,"policyHash":"${policyHash}","document":{"schemaVersion":1,"canonicalizationVersion":1,"supportedCurrencies":{"ZAR":{"scale":2,"maxAmount":"1000000.00"}},"ingest":{"maxEventAgeSeconds":3600,"maxFutureSkewSeconds":60},"rules":{}}}`;
@@ -109,14 +112,10 @@ async function prepareDisconnectedTravel(user: ReturnType<typeof userEvent.setup
   expect(within(steps).getAllByRole('button')).toHaveLength(2);
   await user.clear(screen.getByLabelText('Amount', { exact: true }));
   await user.type(screen.getByLabelText('Amount', { exact: true }), '42.12');
-  await user.clear(screen.getByLabelText('Event ID', { exact: true }));
-  await user.type(screen.getByLabelText('Event ID', { exact: true }), 'trip-cape-town');
   const first = displayedTransactionDraft();
   await user.click(within(steps).getAllByRole('button')[1]);
   await user.clear(screen.getByLabelText('Amount', { exact: true }));
   await user.type(screen.getByLabelText('Amount', { exact: true }), '43.34');
-  await user.clear(screen.getByLabelText('Event ID', { exact: true }));
-  await user.type(screen.getByLabelText('Event ID', { exact: true }), 'trip-johannesburg');
   expect(fetchMock).not.toHaveBeenCalled();
   return [first, displayedTransactionDraft()];
 }
@@ -144,7 +143,10 @@ describe('assessment workspace and connection', () => {
     const drafts = await prepareDisconnectedTravel(user);
     await connect(user);
     await expectPreparedTravel(user, drafts);
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      '/api/v1/evaluations?pageSize=1',
+      '/api/v1/rules',
+    ]);
     expect(screen.getByRole('button', { name: 'Run scenario' })).toBeEnabled();
   });
 
@@ -159,7 +161,11 @@ describe('assessment workspace and connection', () => {
     await expectPreparedTravel(user, drafts);
     await connect(user);
     await expectPreparedTravel(user, drafts);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      '/api/v1/evaluations?pageSize=1',
+      '/api/v1/evaluations?pageSize=1',
+      '/api/v1/rules',
+    ]);
   });
 
   it('connects through the real client, clears the password input and never writes browser storage', async () => {
