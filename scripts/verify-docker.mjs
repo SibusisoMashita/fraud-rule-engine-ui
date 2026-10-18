@@ -26,7 +26,9 @@ const adminKey = `policy-admin.${randomBytes(32).toString('hex')}`;
 const apiKey = `local.${randomBytes(32).toString('hex')}`;
 const revokedSecret = randomBytes(32).toString('hex');
 const revokedKey = `revoked.${revokedSecret}`;
-secrets.push(adminKey, apiKey, revokedKey);
+const readOnlySecret = randomBytes(32).toString('hex');
+const readOnlyKey = `readonly.${readOnlySecret}`;
+secrets.push(adminKey, apiKey, revokedKey, readOnlyKey);
 
 function safe(value) {
   let result = String(value);
@@ -135,6 +137,7 @@ async function browser(phase) {
   const selection = {
     foundation:
       'persisted evaluations|policy inspection|authentication, revocation|keys stay in memory',
+    playground: 'playground:',
     'rate-limit': 'a real rate limit',
     'dependency-down': 'an unavailable real dependency',
     recovered: 'dependency recovery and proxy DNS',
@@ -151,6 +154,7 @@ async function browser(phase) {
         E2E_API_KEY: apiKey,
         E2E_ADMIN_KEY: adminKey,
         E2E_REVOKED_KEY: revokedKey,
+        E2E_READONLY_KEY: readOnlyKey,
         E2E_FIXTURE: JSON.stringify(fixture),
       },
     },
@@ -228,7 +232,11 @@ try {
   base = `http://${(await compose('port', 'app', '8080')).trim()}`;
   await ready(`${base}/health/ready`);
   await sql(`INSERT INTO fraud.api_credentials(key_id,principal_id,secret_hash,valid_from,expires_at,revoked)
-    VALUES ('revoked','local-demo','${createHash('sha256').update(revokedSecret).digest('hex')}',clock_timestamp(),clock_timestamp()+interval '1 day',true);`);
+    VALUES ('revoked','local-demo','${createHash('sha256').update(revokedSecret).digest('hex')}',clock_timestamp(),clock_timestamp()+interval '1 day',true);
+    INSERT INTO fraud.api_principals(principal_id,scope,enabled,roles,location_sources)
+    VALUES ('ui-readonly','local-demo',true,ARRAY['READ','POLICY'],ARRAY[]::text[]);
+    INSERT INTO fraud.api_credentials(key_id,principal_id,secret_hash,valid_from,expires_at)
+    VALUES ('readonly','ui-readonly','${createHash('sha256').update(readOnlySecret).digest('hex')}',clock_timestamp(),clock_timestamp()+interval '1 day');`);
 
   const now = Date.now();
   fixture = {
@@ -311,6 +319,7 @@ try {
   await ready(`${ui}/health/live`);
   console.log(`Disposable UI is ready: ${ui}`);
   await browser('foundation');
+  await browser('playground');
   await browser('rate-limit');
 
   await compose('stop', 'redis');

@@ -24,7 +24,7 @@ export function Connection() {
         </span>
         <div>
           <h2 id="connection-heading">Connect to your engine</h2>
-          <p>Use your local API key to inspect saved decisions and active rules.</p>
+          <p>Use your local API key to try transactions and inspect saved decisions.</p>
         </div>
       </div>
       <form onSubmit={submit} className="connection-form">

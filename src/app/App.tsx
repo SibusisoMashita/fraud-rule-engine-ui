@@ -5,6 +5,7 @@ import { Evaluations } from '../features/evaluations/Evaluations';
 import { Policy } from '../features/policy/Policy';
 import { Transactions } from '../features/transactions/Transactions';
 import { Icon } from '../shared/Icon';
+import { PlaygroundProvider } from '../features/transactions/playground';
 
 type Screen = 'evaluations' | 'policy' | 'transactions';
 const screens: Array<{
@@ -94,13 +95,15 @@ function Shell() {
         <main id="main-content" ref={main} tabIndex={-1}>
           <Connection />
           <div key={generation}>
-            {screen === 'policy' ? (
-              <Policy />
-            ) : screen === 'transactions' ? (
-              <Transactions />
-            ) : (
-              <Evaluations />
-            )}
+            <PlaygroundProvider>
+              {screen === 'policy' ? (
+                <Policy />
+              ) : screen === 'transactions' ? (
+                <Transactions />
+              ) : (
+                <Evaluations />
+              )}
+            </PlaygroundProvider>
           </div>
         </main>
         <footer className="footer">

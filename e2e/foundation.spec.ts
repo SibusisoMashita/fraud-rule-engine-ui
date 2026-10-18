@@ -211,6 +211,7 @@ test('keys stay in memory, reload clears connection, navigation works on a narro
   await page.getByRole('link', { name: 'Try transactions', exact: true }).focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'Try transactions', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Amount', { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
     true,
   );

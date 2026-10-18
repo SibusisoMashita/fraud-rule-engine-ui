@@ -82,7 +82,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (sequence.current === id) {
         admitted = true;
         setClient(candidate);
-        setGeneration((value) => value + 1);
+        // Keep unsent drafts prepared before connecting. A live credential change
+        // still clears scoped state; disconnect already resets it separately.
+        if (client) setGeneration((value) => value + 1);
       }
     } catch (failure) {
       // Failed handshake credentials are discarded; a later request cannot clear a newer session.

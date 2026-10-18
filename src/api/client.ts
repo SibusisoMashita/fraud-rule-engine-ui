@@ -12,12 +12,14 @@ export type Exact<T> = T extends number
 
 export type Evaluation = Exact<components['schemas']['Evaluation']>;
 export type EvaluationPage = Exact<components['schemas']['EvaluationPage']>;
+export type TransactionInput = Exact<components['schemas']['TransactionInput']>;
 export type TransactionResource = Exact<components['schemas']['TransactionResource']>;
 export type RulesView = Exact<components['schemas']['RulesView']>;
 export type EditablePolicy = Exact<components['schemas']['EditablePolicy']>;
 export type EvaluationFilters = NonNullable<operations['listEvaluations']['parameters']['query']>;
 
 export interface ApiResponse<T> {
+  status: number;
   data: T;
   raw: string;
   etag?: string;
@@ -28,10 +30,17 @@ export class ApiError extends Error {
   readonly code: string;
   readonly correlationId?: string;
   readonly retryAt?: number;
+  readonly outcome?: 'UNKNOWN' | 'REJECTED';
 
   constructor(
     message: string,
-    details: { status: number; code: string; correlationId?: string; retryAt?: number },
+    details: {
+      status: number;
+      code: string;
+      correlationId?: string;
+      retryAt?: number;
+      outcome?: 'UNKNOWN' | 'REJECTED';
+    },
   ) {
     super(message);
     this.name = 'ApiError';
@@ -39,6 +48,7 @@ export class ApiError extends Error {
     this.code = details.code;
     this.correlationId = details.correlationId;
     this.retryAt = details.retryAt;
+    this.outcome = details.outcome;
   }
 }
 
@@ -165,16 +175,39 @@ function retryTime(header: string | null): number | undefined {
   return Number.isFinite(timestamp) && timestamp > now ? timestamp : undefined;
 }
 
-function errorMessage(status: number): string {
+const unknownSubmission =
+  'The submission outcome is unknown. Retrieve the transaction or replay the same event ID and exact payload before changing it.';
+
+function submissionOutcome(status?: number): 'UNKNOWN' | 'REJECTED' {
+  return status !== undefined && status >= 400 && status < 500 ? 'REJECTED' : 'UNKNOWN';
+}
+
+function errorMessage(status: number, submission = false, code?: string): string {
   switch (status) {
     case 400:
-      return 'The request was not accepted. Check the filters and try again.';
+      return submission
+        ? 'The transaction was not accepted. Check its fields before trying again.'
+        : 'The request was not accepted. Check the filters and try again.';
     case 401:
       return 'The API key is no longer accepted. Connect again with a valid key.';
     case 403:
       return 'This API key does not have permission for this action.';
     case 404:
       return 'This resource is unavailable for the connected account.';
+    case 409:
+      if (code === 'INSTRUMENT_OWNER_CONFLICT') {
+        return 'This instrument is already associated with another customer.';
+      }
+      if (code === 'EVENT_CONTENT_CONFLICT') {
+        return 'This event ID is already associated with different content. Retrieve the stored transaction before changing the payload.';
+      }
+      return 'The transaction conflicts with stored data. Check its identifiers or retrieve the stored transaction.';
+    case 413:
+      return 'The request exceeds the service size limit.';
+    case 415:
+      return 'The service requires a JSON request.';
+    case 422:
+      return 'The submitted values do not meet the active policy requirements.';
     case 429:
       return 'The request limit was reached. Wait before trying again.';
     case 503:
@@ -188,38 +221,77 @@ function errorMessage(status: number): string {
 export function createApiClient(apiKey: string, options: ClientOptions = {}) {
   let cooldown: ApiError | undefined;
 
-  async function get<T>(
+  async function request<T>(
+    method: 'GET' | 'POST',
     path: string,
     valid: (value: unknown) => boolean,
     signal?: AbortSignal,
+    body?: string,
   ): Promise<ApiResponse<Exact<T>>> {
+    // A local block has no submission outcome: callers must retain any earlier uncertainty.
     signal?.throwIfAborted();
-    if (cooldown?.retryAt !== undefined && cooldown.retryAt > Date.now()) throw cooldown;
+    if (cooldown?.retryAt !== undefined && cooldown.retryAt > Date.now()) {
+      throw new ApiError('Wait before another request. This request was not sent.', {
+        status: cooldown.status,
+        code: cooldown.code,
+        correlationId: cooldown.correlationId,
+        retryAt: cooldown.retryAt,
+      });
+    }
 
-    let response: Response;
+    const submission = method === 'POST';
+    let response: Response | undefined;
     let raw: string;
     try {
       response = await fetch(path, {
-        method: 'GET',
-        headers: { Accept: 'application/json', 'X-API-Key': apiKey },
+        method,
+        headers: {
+          Accept: 'application/json',
+          'X-API-Key': apiKey,
+          ...(submission ? { 'Content-Type': 'application/json' } : {}),
+        },
         cache: 'no-store',
         credentials: 'omit',
         redirect: 'error',
         signal,
+        ...(submission ? { body } : {}),
       });
       raw = await response.text();
       signal?.throwIfAborted();
     } catch (error) {
-      if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError'))
-        throw error;
-      // Browser/network error messages can contain URLs. Keep the public error deliberately fixed.
-      throw new ApiError(
-        'Could not reach the service. Check that Docker is running and try again.',
-        {
-          status: 0,
-          code: 'NETWORK_UNAVAILABLE',
-        },
-      );
+      if (response && !response.ok) {
+        // The HTTP status and headers remain authoritative when its optional error body is lost.
+        raw = '';
+      } else {
+        if (submission) {
+          const retryAt = retryTime(response?.headers.get('Retry-After') ?? null);
+          const failure = new ApiError(unknownSubmission, {
+            status: response?.status ?? 0,
+            code: 'SUBMISSION_OUTCOME_UNKNOWN',
+            correlationId: safeIdentifier(
+              response?.headers.get('X-Correlation-ID'),
+              /^[A-Za-z0-9._:-]{1,128}$/,
+            ),
+            retryAt,
+            outcome: 'UNKNOWN',
+          });
+          if (retryAt !== undefined) {
+            cooldown = failure;
+            options.onRateLimit?.(retryAt);
+          }
+          throw failure;
+        }
+        if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError'))
+          throw error;
+        // Browser/network error messages can contain URLs. Keep the public error deliberately fixed.
+        throw new ApiError(
+          'Could not reach the service. Check that Docker is running and try again.',
+          {
+            status: 0,
+            code: 'NETWORK_UNAVAILABLE',
+          },
+        );
+      }
     }
 
     let parsed: unknown;
@@ -232,14 +304,20 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
     if (!response.ok) {
       const problem = record(parsed) ? parsed : {};
       const retryAt = retryTime(response.headers.get('Retry-After'));
-      const failure = new ApiError(errorMessage(response.status), {
-        status: response.status,
-        code: safeIdentifier(problem.code, /^[A-Z][A-Z0-9_]{0,63}$/) ?? 'REQUEST_FAILED',
-        correlationId:
-          safeIdentifier(problem.correlationId, /^[A-Za-z0-9._:-]{1,128}$/) ??
-          safeIdentifier(response.headers.get('X-Correlation-ID'), /^[A-Za-z0-9._:-]{1,128}$/),
-        retryAt,
-      });
+      const outcome = submission ? submissionOutcome(response.status) : undefined;
+      const code = safeIdentifier(problem.code, /^[A-Z][A-Z0-9_]{0,63}$/) ?? 'REQUEST_FAILED';
+      const failure = new ApiError(
+        outcome === 'UNKNOWN' ? unknownSubmission : errorMessage(response.status, submission, code),
+        {
+          status: response.status,
+          code,
+          correlationId:
+            safeIdentifier(problem.correlationId, /^[A-Za-z0-9._:-]{1,128}$/) ??
+            safeIdentifier(response.headers.get('X-Correlation-ID'), /^[A-Za-z0-9._:-]{1,128}$/),
+          retryAt,
+          outcome,
+        },
+      );
       if (response.status === 401) options.onUnauthorized?.();
       if (retryAt !== undefined) {
         cooldown = failure;
@@ -248,17 +326,29 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
       throw failure;
     }
 
-    if (!valid(parsed)) {
-      throw new ApiError('The service returned an unreadable response. Try again later.', {
-        status: response.status,
-        code: 'INVALID_RESPONSE',
-      });
+    const validStatus = !submission || response.status === 200 || response.status === 201;
+    if (!validStatus || !valid(parsed)) {
+      throw new ApiError(
+        submission
+          ? unknownSubmission
+          : 'The service returned an unreadable response. Try again later.',
+        {
+          status: response.status,
+          code: 'INVALID_RESPONSE',
+          ...(submission ? ({ outcome: 'UNKNOWN' } as const) : {}),
+        },
+      );
     }
     return {
+      status: response.status,
       data: parsed as Exact<T>,
       raw,
       ...(response.headers.has('ETag') ? { etag: response.headers.get('ETag')! } : {}),
     };
+  }
+
+  function get<T>(path: string, valid: (value: unknown) => boolean, signal?: AbortSignal) {
+    return request<T>('GET', path, valid, signal);
   }
 
   return {
@@ -288,6 +378,19 @@ export function createApiClient(apiKey: string, options: ClientOptions = {}) {
         `/api/v1/transactions/${encodeURIComponent(eventId)}`,
         transactionResource,
         signal,
+      );
+    },
+    /**
+     * Send the original JSON unchanged. Never generate a new identity to recover an uncertain attempt.
+     * An error without an outcome happened before dispatch; preserve any earlier UNKNOWN outcome.
+     */
+    submitTransaction(raw: string, signal?: AbortSignal) {
+      return request<components['schemas']['TransactionResource']>(
+        'POST',
+        '/api/v1/transactions',
+        transactionResource,
+        signal,
+        raw,
       );
     },
     getRules(signal?: AbortSignal) {

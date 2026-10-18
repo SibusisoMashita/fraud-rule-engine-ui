@@ -2,7 +2,7 @@
 
 **Fraud Rule Engine — Assessment Demo** is a React and TypeScript interface for the [Fraud Rule Engine Service](https://github.com/SibusisoMashita/fraud-rule-engine-service). It uses the supplied Capitec assets for this assessment presentation.
 
-This foundation lets you browse saved evaluations, open transaction evidence and inspect active policy. Transaction scenarios and the policy editor follow in the next check-ins. Every displayed evaluation comes from the API.
+Submit synthetic transactions, explore five editable scenarios, browse saved evaluations and inspect active policy. Every displayed decision comes from the API. Policy editing follows in the next check-in.
 
 ## Run with Docker
 
@@ -19,9 +19,17 @@ You need Git and Docker with Compose 2.24.4+. On Windows, use Docker Desktop wit
 
 The key stays in memory until you disconnect or reload. The browser sends requests to the UI's own origin; NGINX forwards API calls to the backend's Docker network. PostgreSQL and Redis need no published ports.
 
-For the optional administrator connection, follow the backend's [administrator setup](https://github.com/SibusisoMashita/fraud-rule-engine-service/blob/main/docs/OPERATIONS.md#optional-policy-administration-api) and use its separate `secrets/local-policy-admin-api-key`. This check-in uses it to inspect the editable document and revision.
+For the optional administrator connection, follow the backend's [administrator setup](https://github.com/SibusisoMashita/fraud-rule-engine-service/blob/main/docs/OPERATIONS.md#optional-policy-administration-api) and use its separate `secrets/local-policy-admin-api-key` to inspect the complete policy document and revision. The Policy screen remains read-only.
 
 Stop the UI with `docker compose down`. This leaves the backend running.
+
+## Try transactions
+
+Open **Try transactions** and choose a manual transaction or one of the five scenarios. Review and edit the steps, then submit. Scenarios send in order and stop at the first failed or uncertain response. Preset values are examples; the backend's live policy determines the result. **New scenario run** creates fresh identifiers.
+
+Select a submission to inspect its rule evidence and raw response, replay the retained payload or send a different amount under the same event ID. For an uncertain response, keep that ID and payload and use the explicit recovery actions; [recovery details](docs/ARCHITECTURE.md#submission-and-recovery) explain what retrieval can confirm.
+
+The submission journal stays in memory when you change screens. Disconnecting or reloading clears it, so resolve uncertain submissions before leaving the session.
 
 ## Change the Docker connection
 
@@ -57,7 +65,7 @@ npm run verify:docker
 
 Docker verification needs the sibling backend checkout at the revision in [api/source.json](api/source.json). Set `BACKEND_PROJECT_DIR` if it lives elsewhere. The script builds isolated projects, runs browser and API checks, and removes its containers and test data afterward. It does not use your running demo database.
 
-[CI](.github/workflows/verify.yaml) runs these checks on Linux, installs browser dependencies and scans the runtime image and source. Generated test results are excluded from Git. Browser traces, videos and screenshots stay disabled so they cannot capture API keys. A Windows host still needs WSL2; native Windows execution is outside these POSIX instructions.
+[CI](.github/workflows/verify.yaml) runs these checks on Linux, installs browser dependencies and scans the runtime image and source. Generated test results are excluded from Git. Browser traces and videos stay disabled. Screenshots are off by default; optional local previews require empty credential fields and stay under ignored `target/preview/`. A Windows host still needs WSL2; native Windows execution is outside these POSIX instructions.
 
 ## Where to look
 

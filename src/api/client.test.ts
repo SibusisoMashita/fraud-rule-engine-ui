@@ -12,6 +12,14 @@ const key = 'test-key.synthetic-secret';
 const rulesJson = '{"rules":[],"policyHash":"hash"}';
 const transactionJson =
   '{"transaction":{"eventId":"evt-1","customerId":"customer-1","instrumentId":"card-1","transactionType":"CARD_PURCHASE","status":"BOOKED","channel":"CARD_PRESENT","amount":"9999999999999999.9999","currency":"ZAR","category":"OTHER","occurredAt":"2026-10-18T12:00:00Z","physicalLocation":{"latitude":-33.9249,"longitude":18.4241,"accuracyKm":0.12345678901234567890123456789,"source":"VERIFIED_CARD_PRESENT_TERMINAL"}},"evaluation":{"id":"evaluation-1","eventId":"evt-1","decision":"FLAGGED","coverage":"COMPLETE","policyHash":"hash","buildId":"test","acceptedAt":"2026-10-18T12:00:00Z","evaluatedAt":"2026-10-18T12:00:00Z","contextHighWatermark":9007199254740993,"ruleResults":[{"ruleId":"IMPOSSIBLE_TRAVEL","algorithmVersion":"1","status":"MATCH","reasonCode":"TRAVEL_TOO_FAST","evidence":{"distanceKm":1234.5678901234567890123456789}}]}}';
+const submittedJson = `{
+  "eventId":"evt-1", "customerId":"customer-1", "instrumentId":"card-1",
+  "transactionType":"CARD_PURCHASE", "status":"BOOKED", "channel":"CARD_PRESENT",
+  "amount":"9999999999999999.9999", "currency":"ZAR", "category":"OTHER",
+  "occurredAt":"2026-10-18T12:00:00Z",
+  "physicalLocation":{"latitude":-33.924900,"longitude":18.424100,
+    "accuracyKm":0.12345678901234567890123456789,"source":"VERIFIED_CARD_PRESENT_TERMINAL"}
+}`;
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function response(body: string, status = 200, headers: HeadersInit = {}) {
@@ -37,6 +45,7 @@ describe('lossless API data', () => {
     fetchMock.mockResolvedValue(response(raw));
 
     const result = await createApiClient(key).getTransaction('evt-1');
+    expect(result.status).toBe(200);
     expect(result.raw).toBe(raw);
     expect(result.data.transaction.amount).toBe('9999999999999999.9999');
     expect(isLosslessNumber(result.data.transaction.physicalLocation?.accuracyKm)).toBe(true);
@@ -164,6 +173,20 @@ describe('fixed API routes and request safety', () => {
 });
 
 describe('errors, permissions and cancellation', () => {
+  it('clears the caller session when reading a known HTTP 401 response body fails', async () => {
+    const onUnauthorized = vi.fn();
+    const received = response('{}', 401, { 'X-Correlation-ID': 'interrupted-read-test' });
+    vi.spyOn(received, 'text').mockRejectedValue(new TypeError('Synthetic interrupted error body'));
+    fetchMock.mockResolvedValue(received);
+    await expect(createApiClient(key, { onUnauthorized }).getRules()).rejects.toMatchObject({
+      status: 401,
+      correlationId: 'interrupted-read-test',
+      outcome: undefined,
+    });
+    expect(onUnauthorized).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('clears the caller session on 401 even if the error body is unreadable', async () => {
     const onUnauthorized = vi.fn();
     fetchMock.mockResolvedValue(response('upstream error', 401));
@@ -239,6 +262,263 @@ describe('errors, permissions and cancellation', () => {
     await expect(createApiClient(key).getRules(new AbortController().signal)).rejects.toMatchObject(
       { name: 'AbortError' },
     );
+  });
+});
+
+describe('transaction submission', () => {
+  it.each([201, 200])(
+    'posts the original JSON untouched and returns the %s result with exact evidence',
+    async (status) => {
+      fetchMock.mockResolvedValue(response(transactionJson, status));
+      const signal = new AbortController().signal;
+      const result = await createApiClient(key).submitTransaction(submittedJson, signal);
+      expect(result.status).toBe(status);
+      expect(result.raw).toBe(transactionJson);
+      expect(displayValue(result.data.transaction.physicalLocation?.accuracyKm)).toBe(
+        '0.12345678901234567890123456789',
+      );
+      expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/api/v1/transactions', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'X-API-Key': key,
+          'Content-Type': 'application/json',
+        },
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'error',
+        signal,
+        body: submittedJson,
+      });
+    },
+  );
+
+  it.each([400, 401, 403, 409, 413, 415, 422, 429])(
+    'treats an explicit HTTP %s as a rejected attempt',
+    async (status) => {
+      const onUnauthorized = vi.fn();
+      fetchMock.mockResolvedValue(
+        response('{"code":"REQUEST_REJECTED","correlationId":"submission-reference"}', status),
+      );
+      const failure = await createApiClient(key, { onUnauthorized })
+        .submitTransaction(submittedJson)
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ApiError);
+      expect(failure).toMatchObject({
+        status,
+        outcome: 'REJECTED',
+        code: 'REQUEST_REJECTED',
+        correlationId: 'submission-reference',
+      });
+      expect(onUnauthorized).toHaveBeenCalledTimes(status === 401 ? 1 : 0);
+      expect(String(failure)).not.toContain(key);
+      expect(String(failure)).not.toContain(submittedJson);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([500, 502, 503, 504])(
+    'preserves uncertainty for HTTP %s even if its body claims not accepted',
+    async (status) => {
+      fetchMock.mockResolvedValue(
+        response('{"code":"DEPENDENCY_UNAVAILABLE","outcome":"NOT_ACCEPTED"}', status),
+      );
+      const failure = await createApiClient(key)
+        .submitTransaction(submittedJson)
+        .catch((error: unknown) => error);
+      expect(failure).toMatchObject({ status, outcome: 'UNKNOWN' });
+      expect(String(failure)).toMatch(/retrieve.*same event ID and exact payload/i);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    ['EVENT_CONTENT_CONFLICT', /event ID.*different content/i],
+    ['INSTRUMENT_OWNER_CONFLICT', /instrument.*another customer/i],
+    ['UNRECOGNIZED_CONFLICT', /conflicts with stored data/i],
+  ] as const)('explains HTTP 409 using its safe %s code', async (code, message) => {
+    fetchMock.mockResolvedValue(response(JSON.stringify({ code }), 409));
+    const failure = await createApiClient(key)
+      .submitTransaction(submittedJson)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({ status: 409, code, outcome: 'REJECTED' });
+    expect(String(failure)).toMatch(message);
+    if (code !== 'EVENT_CONTENT_CONFLICT')
+      expect(String(failure)).not.toMatch(/event ID.*different content/i);
+  });
+
+  it.each(['not JSON', '{}'])(
+    'treats an unreadable successful response as an uncertain commit: %s',
+    async (body) => {
+      fetchMock.mockResolvedValue(response(body, 201));
+      await expect(createApiClient(key).submitTransaction(submittedJson)).rejects.toMatchObject({
+        status: 201,
+        code: 'INVALID_RESPONSE',
+        outcome: 'UNKNOWN',
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not claim a committed result for an unexpected 202 with an otherwise valid resource', async () => {
+    fetchMock.mockResolvedValue(response(transactionJson, 202));
+    await expect(createApiClient(key).submitTransaction(submittedJson)).rejects.toMatchObject({
+      status: 202,
+      code: 'INVALID_RESPONSE',
+      outcome: 'UNKNOWN',
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('keeps network failures private and uncertain without retrying', async () => {
+    fetchMock.mockRejectedValue(
+      new TypeError(`Failed to fetch https://example.test/${key}?payload=${submittedJson}`),
+    );
+    const failure = await createApiClient(key)
+      .submitTransaction(submittedJson)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      status: 0,
+      code: 'SUBMISSION_OUTCOME_UNKNOWN',
+      outcome: 'UNKNOWN',
+    });
+    expect(String(failure)).not.toContain(key);
+    expect(JSON.stringify(failure)).not.toContain('customer-1');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('treats a response-body failure as uncertain after receiving a success status', async () => {
+    const received = response(transactionJson, 201);
+    vi.spyOn(received, 'text').mockRejectedValue(new TypeError('Synthetic interrupted response'));
+    fetchMock.mockResolvedValue(received);
+    await expect(createApiClient(key).submitTransaction(submittedJson)).rejects.toMatchObject({
+      status: 201,
+      code: 'SUBMISSION_OUTCOME_UNKNOWN',
+      outcome: 'UNKNOWN',
+    });
+  });
+
+  it('retains the authentication callback when reading a rejected response fails', async () => {
+    const onUnauthorized = vi.fn();
+    const received = response('{}', 401);
+    vi.spyOn(received, 'text').mockRejectedValue(new TypeError('Synthetic interrupted response'));
+    fetchMock.mockResolvedValue(received);
+    await expect(
+      createApiClient(key, { onUnauthorized }).submitTransaction(submittedJson),
+    ).rejects.toMatchObject({
+      status: 401,
+      outcome: 'REJECTED',
+    });
+    expect(onUnauthorized).toHaveBeenCalledOnce();
+  });
+
+  it.each([403, 409, 429])(
+    'treats an interrupted HTTP %s error body as a rejected attempt',
+    async (status) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+      const onUnauthorized = vi.fn();
+      const onRateLimit = vi.fn();
+      const received = response('{}', status, {
+        'Retry-After': '3',
+        'X-Correlation-ID': 'interrupted-error-test',
+      });
+      vi.spyOn(received, 'text').mockRejectedValue(
+        new TypeError(`Synthetic interrupted body ${key}`),
+      );
+      fetchMock.mockResolvedValue(received);
+      const client = createApiClient(key, { onUnauthorized, onRateLimit });
+      const failure = await client
+        .submitTransaction(submittedJson)
+        .catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        status,
+        outcome: 'REJECTED',
+        correlationId: 'interrupted-error-test',
+        retryAt: Date.now() + 3000,
+      });
+      expect(String(failure)).not.toContain(key);
+      expect(onUnauthorized).not.toHaveBeenCalled();
+      expect(onRateLimit).toHaveBeenCalledExactlyOnceWith(Date.now() + 3000);
+      await expect(client.submitTransaction(submittedJson)).rejects.toMatchObject({
+        status,
+        outcome: undefined,
+      });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('preserves uncertainty when a dispatched request is cancelled', async () => {
+    const controller = new AbortController();
+    fetchMock.mockImplementation(
+      (_path: string, options: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          options.signal!.addEventListener(
+            'abort',
+            () => reject(new DOMException('Cancelled', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+    const result = createApiClient(key).submitTransaction(submittedJson, controller.signal);
+    const assertion = expect(result).rejects.toMatchObject({ status: 0, outcome: 'UNKNOWN' });
+    controller.abort();
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('leaves an already cancelled attempt without an outcome because nothing was dispatched', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const failure = await createApiClient(key)
+      .submitTransaction(submittedJson, controller.signal)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({ name: 'AbortError' });
+    expect(failure).not.toHaveProperty('outcome');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps local cooldown errors outcome-free and requires an explicit identical replay after recovery', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+    fetchMock
+      .mockResolvedValueOnce(response('{}', 503, { 'Retry-After': '2' }))
+      .mockResolvedValue(response(transactionJson, 200));
+    const client = createApiClient(key);
+    await expect(client.submitTransaction(submittedJson)).rejects.toMatchObject({
+      outcome: 'UNKNOWN',
+    });
+    const blocked = await client.submitTransaction(submittedJson).catch((error: unknown) => error);
+    expect(blocked).toMatchObject({ status: 503, retryAt: Date.now() + 2000 });
+    expect((blocked as ApiError).outcome).toBeUndefined();
+    expect(String(blocked)).toMatch(/not sent/i);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const replay = await client.submitTransaction(submittedJson);
+    expect(replay.status).toBe(200);
+    expect(fetchMock.mock.calls.map(([, options]) => options.body)).toEqual([
+      submittedJson,
+      submittedJson,
+    ]);
+  });
+
+  it('respects Retry-After even when a failure body cannot be read', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+    const onRateLimit = vi.fn();
+    const received = response('{}', 503, { 'Retry-After': '3' });
+    vi.spyOn(received, 'text').mockRejectedValue(new TypeError('Synthetic interrupted response'));
+    fetchMock.mockResolvedValue(received);
+    const client = createApiClient(key, { onRateLimit });
+    await expect(client.submitTransaction(submittedJson)).rejects.toMatchObject({
+      outcome: 'UNKNOWN',
+      retryAt: Date.now() + 3000,
+    });
+    expect(onRateLimit).toHaveBeenCalledExactlyOnceWith(Date.now() + 3000);
+    await expect(client.getRules()).rejects.toMatchObject({ status: 503, outcome: undefined });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
 

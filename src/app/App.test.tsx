@@ -92,7 +92,76 @@ async function policy(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole('heading', { name: 'High amount' });
 }
 
+function displayedTransactionDraft() {
+  return Object.fromEntries(
+    ['Amount', 'Event ID', 'Customer ID', 'Instrument ID', 'Occurred at', 'City'].map((label) => [
+      label,
+      screen.getByLabelText<HTMLInputElement>(label, { exact: true }).value,
+    ]),
+  );
+}
+
+async function prepareDisconnectedTravel(user: ReturnType<typeof userEvent.setup>) {
+  window.history.replaceState({}, '', '/#transactions');
+  render(<App />);
+  await user.click(screen.getByRole('button', { name: 'Impossible travel' }));
+  const steps = screen.getByRole('group', { name: 'Scenario transactions' });
+  expect(within(steps).getAllByRole('button')).toHaveLength(2);
+  await user.clear(screen.getByLabelText('Amount', { exact: true }));
+  await user.type(screen.getByLabelText('Amount', { exact: true }), '42.12');
+  await user.clear(screen.getByLabelText('Event ID', { exact: true }));
+  await user.type(screen.getByLabelText('Event ID', { exact: true }), 'trip-cape-town');
+  const first = displayedTransactionDraft();
+  await user.click(within(steps).getAllByRole('button')[1]);
+  await user.clear(screen.getByLabelText('Amount', { exact: true }));
+  await user.type(screen.getByLabelText('Amount', { exact: true }), '43.34');
+  await user.clear(screen.getByLabelText('Event ID', { exact: true }));
+  await user.type(screen.getByLabelText('Event ID', { exact: true }), 'trip-johannesburg');
+  expect(fetchMock).not.toHaveBeenCalled();
+  return [first, displayedTransactionDraft()];
+}
+
+async function expectPreparedTravel(
+  user: ReturnType<typeof userEvent.setup>,
+  drafts: Array<Record<string, string>>,
+) {
+  expect(screen.getByRole('button', { name: 'Impossible travel' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  const steps = screen.getByRole('group', { name: 'Scenario transactions' });
+  expect(within(steps).getAllByRole('button')).toHaveLength(2);
+  for (let index = 0; index < drafts.length; index++) {
+    await user.click(within(steps).getAllByRole('button')[index]);
+    expect(displayedTransactionDraft()).toEqual(drafts[index]);
+  }
+  expect(fetchMock.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true);
+}
+
 describe('assessment workspace and connection', () => {
+  it('preserves a scenario prepared while disconnected when the first connection succeeds', async () => {
+    const user = userEvent.setup();
+    const drafts = await prepareDisconnectedTravel(user);
+    await connect(user);
+    await expectPreparedTravel(user, drafts);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: 'Run scenario' })).toBeEnabled();
+  });
+
+  it('keeps both edited scenario steps after a failed key and a later successful connection', async () => {
+    const user = userEvent.setup();
+    const drafts = await prepareDisconnectedTravel(user);
+    fetchMock.mockResolvedValueOnce(json('{"code":"UNAUTHORIZED"}', 401));
+    await user.type(screen.getByLabelText('API key', { exact: true }), 'invalid.synthetic-key');
+    await user.click(screen.getByRole('button', { name: 'Connect' }));
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('button', { name: 'Disconnect' })).not.toBeInTheDocument();
+    await expectPreparedTravel(user, drafts);
+    await connect(user);
+    await expectPreparedTravel(user, drafts);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('connects through the real client, clears the password input and never writes browser storage', async () => {
     const user = userEvent.setup();
     render(<App />);
