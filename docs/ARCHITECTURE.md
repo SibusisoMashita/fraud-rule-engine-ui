@@ -42,7 +42,7 @@ Browser on localhost:3000
                                 existing backend
 ```
 
-The UI joins an existing external Docker network. Startup accepts only the two documented upstream names. NGINX proxies the API's known paths, preserves backend responses and disables upstream retries. Docker's DNS resolver refreshes backend addresses after container recreation. The UI cannot start or scale backend containers.
+The UI joins an existing external Docker network. Startup accepts only the two documented upstream names. NGINX proxies the API's known paths, preserves backend responses and disables upstream retries. NGINX refreshes addresses through Docker DNS with a five-second cache; requests can fail during a backend handoff. The UI stays available, and the user can retry a read after recovery. The UI cannot start or scale backend containers.
 
 The image builds with pinned Node and NGINX digests. NGINX runs as a non-root user with a read-only filesystem, dropped capabilities and a small temporary filesystem. Only the loopback UI port is published. `/health/live` reports that NGINX serves requests, independently of backend readiness.
 
@@ -50,6 +50,6 @@ Assets and Inter fonts are bundled with the build. Shared CSS holds the supplied
 
 ## Verification
 
-Vitest and React Testing Library cover client behaviour, exact request serialization, scenario sequencing and screen states. Playwright runs against real disposable Docker services for transaction scenarios, connection, permissions, persisted data, pagination and policy inspection. The Docker verifier also checks proxy routing and recreation. CI uses the exact backend revision from the contract metadata.
+Vitest and React Testing Library cover client behaviour, exact request serialization, scenario sequencing and screen states. Playwright runs against real disposable Docker services for transaction scenarios, connection, permissions, persisted data, pagination and policy inspection. The Docker verifier replaces the backend at a different IP while keeping the UI container running. It requires sustained successful reads across DNS refreshes before checking browser reconnection and subsequent reads. Helper tests cover interrupted recovery and bounded timeouts. CI uses the exact backend revision from the contract metadata.
 
 The policy edit/validate/review/activate flow remains the next planned check-in. Backend rule algorithms, activation transactions and operational limits are described in the [service architecture](https://github.com/SibusisoMashita/fraud-rule-engine-service/blob/main/docs/ARCHITECTURE.md).

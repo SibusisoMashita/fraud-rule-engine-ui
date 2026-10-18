@@ -282,8 +282,20 @@ test('an unavailable real dependency gives an actionable failure', async ({ page
 
 test('dependency recovery and proxy DNS changes keep reads working', async ({ page }) => {
   test.skip(!['recovered', 'recreated', 'balanced'].includes(phase));
+  const connection = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/api/v1/evaluations',
+  );
   await connect(page);
-  await expect(page.getByRole('heading', { name: 'Evaluations', exact: true })).toBeVisible();
+  expect((await connection).status(), `${phase}: the connection read must succeed`).toBe(200);
+  await expect(page.getByRole('button', { name: 'Disconnect', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'View details', exact: true }).first(),
+  ).toBeVisible();
+  const refresh = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/api/v1/evaluations',
+  );
+  await page.getByRole('button', { name: 'Refresh evaluations', exact: true }).click();
+  expect((await refresh).status(), `${phase}: a subsequent read must also succeed`).toBe(200);
   await expect(
     page.getByRole('button', { name: 'View details', exact: true }).first(),
   ).toBeVisible();
