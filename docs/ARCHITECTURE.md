@@ -1,0 +1,45 @@
+# Architecture
+
+The UI explains the existing service through three feature areas. Business decisions and permission checks remain in the backend.
+
+| Area                        | Responsibility                                                                                                |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `src/features/transactions` | Transaction playground; the foundation introduces the screen, with submission scenarios in the next milestone |
+| `src/features/evaluations`  | Filters, cursor pages and full transaction evidence                                                           |
+| `src/features/policy`       | Active rule settings and optional administrator inspection; editing follows later                             |
+| `src/api`                   | One HTTP client, generated contract types and lossless JSON handling                                          |
+| Shared UI and theme         | Connection state, reusable controls, navigation and visual tokens                                             |
+
+## Requests and credentials
+
+The browser calls only relative `/api/v1` paths. One client adds the appropriate in-memory API key and handles API errors, correlation IDs and `Retry-After`. It does not automatically retry requests. Disconnecting or reloading clears credentials and displayed protected data. Keys are excluded from storage, URLs and application logs.
+
+The ordinary credential can read its scoped evaluations and inspect rules. A separate optional `POLICY_ADMIN` credential can read the complete policy document and revision. The UI does not grant permissions; the backend checks each request. Administrator connection errors do not promote the ordinary key.
+
+Generated API types come from the committed [OpenAPI copy](../api/openapi.yaml). [Source metadata](../api/source.json) records its backend revision and checksum. `npm run api:check` verifies the checksum and generated types; update the contract deliberately with the backend change.
+
+Money remains a string. JSON evidence numbers use lossless parsing and retain their original decimal representation when displayed or formatted as JSON. Policy revisions also avoid floating-point conversion. These boundaries matter because evidence must match the stored result exactly.
+
+## Docker boundary
+
+```text
+Browser on localhost:3000
+    |
+    +-- static files --> unprivileged NGINX
+    |
+    +-- /api/v1/... --> NGINX --> app:8080 or load-balancer:8080
+                                      |
+                                existing backend
+```
+
+The UI joins an existing external Docker network. Startup accepts only the two documented upstream names. NGINX proxies the API's known paths, preserves backend responses and disables upstream retries. Docker's DNS resolver refreshes backend addresses after container recreation. The UI cannot start or scale backend containers.
+
+The image builds with pinned Node and NGINX digests. NGINX runs as a non-root user with a read-only filesystem, dropped capabilities and a small temporary filesystem. Only the loopback UI port is published. `/health/live` reports that NGINX serves requests, independently of backend readiness.
+
+Assets and Inter fonts are bundled with the build. Shared CSS holds the supplied branding's colours, spacing and controls. The Content Security Policy permits local scripts, styles, images and fonts, with same-origin connections. No external asset service or browser storage is required.
+
+## Verification
+
+Vitest and React Testing Library cover client behaviour and screen states. Playwright runs against real disposable Docker services for connection, permissions, persisted data, pagination and policy inspection. The Docker verifier also checks proxy routing and recreation. CI uses the exact backend revision from the contract metadata.
+
+The foundation contains read views. Five transaction scenarios, uncertain-write recovery and the policy edit/validate/review/activate flow remain separate planned check-ins. Backend rule algorithms, activation transactions and operational limits are described in the [service architecture](https://github.com/SibusisoMashita/fraud-rule-engine-service/blob/main/docs/ARCHITECTURE.md).

@@ -1,0 +1,80 @@
+name: Verify UI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-ui-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: ui
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: ui/.nvmrc
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Read pinned backend revision
+        id: backend
+        run: node -e 'const fs=require("node:fs"); const {commit}=JSON.parse(fs.readFileSync("api/source.json","utf8")); if(!/^[a-f0-9]{40}$/.test(commit)) throw new Error("Invalid backend commit"); fs.appendFileSync(process.env.GITHUB_OUTPUT, `commit=${commit}\n`);'
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: SibusisoMashita/fraud-rule-engine-service
+          ref: ${{ steps.backend.outputs.commit }}
+          path: backend
+          persist-credentials: false
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify contract, types and behaviour
+        run: |
+          npm run check
+          npm audit --audit-level=high
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+      - name: Verify the real Docker API and browser flows
+        env:
+          BACKEND_PROJECT_DIR: ${{ github.workspace }}/backend
+        run: npm run verify:docker
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-failure-evidence
+          path: |
+            ui/test-results/
+            ui/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install checksum-verified scanner
+        run: |
+          mkdir -p /tmp/ui-tools
+          cd /tmp/ui-tools
+          curl --fail --location --retry 3 --remote-name https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz
+          curl --fail --location --retry 3 --remote-name https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_checksums.txt
+          grep '  trivy_0.76.0_Linux-64bit.tar.gz$' trivy_0.76.0_checksums.txt | sha256sum --check --strict
+          tar -xzf trivy_0.76.0_Linux-64bit.tar.gz trivy
+      - name: Build and scan runtime image
+        run: |
+          docker build --tag fraud-rule-engine-ui:ci .
+          /tmp/ui-tools/trivy image --severity HIGH,CRITICAL --exit-code 1 --scanners vuln,secret fraud-rule-engine-ui:ci
+      - name: Scan source for secrets
+        run: /tmp/ui-tools/trivy filesystem --exit-code 1 --scanners secret --skip-dirs .git .

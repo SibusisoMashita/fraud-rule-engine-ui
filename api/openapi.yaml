@@ -1,0 +1,1072 @@
+openapi: 3.1.1
+info:
+  title: Fraud Rule Engine Service
+  version: 0.1.0
+  description: Transaction and query contract. Transaction POST with all five fraud-rule evaluations, scoped event GET, evaluation pages and active rule-policy inspection are implemented. New committed input returns 201, identical replay 200, and changed content 409. Runtime readiness checks DB, Redis, schema and active policy compatibility. Policy activation uses the operator CLI or an optional administrator API, disabled by default. Monetary values are decimal strings. Service
+    config may tighten published transport maxima. Rule IDs/results are extensible up to the published 64-rule bound;
+    initial policy has five. Per-rule evidence is a bounded scalar map with versioned application semantics. Policy
+    settings are validated on activation and loading; this contract does not certify their business validity.
+security:
+- ApiKey: []
+paths:
+  /api/v1/transactions:
+    post:
+      operationId: ingestTransaction
+      summary: Evaluate one BOOKED outgoing debit
+      description: 'Requires ingest role; scope derived from credential. Stable eventId is the business debit identity.
+        5xx/transport failure may follow a commit: replay identical ID/payload. Existing replay bypasses current
+        new-event age/currency eligibility, but not authorization or safety bounds.'
+      x-required-role: ingest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionInput'
+            example:
+              eventId: evt-001
+              customerId: customer-123
+              instrumentId: card-token-456
+              transactionType: CARD_PURCHASE
+              status: BOOKED
+              channel: ECOMMERCE
+              amount: '1500.00'
+              currency: ZAR
+              category: GROCERIES
+              occurredAt: '2026-10-15T10:00:00Z'
+      responses:
+        '201':
+          description: New committed evaluation
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+            Location:
+              schema:
+                type: string
+                format: uri-reference
+              description: URI of scoped transaction resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResource'
+        '200':
+          description: Identical replay of original stored result
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResource'
+        '400':
+          $ref: '#/components/responses/Problem400'
+        '401':
+          $ref: '#/components/responses/Problem401'
+        '403':
+          $ref: '#/components/responses/Problem403'
+        '409':
+          $ref: '#/components/responses/Problem409'
+        '413':
+          $ref: '#/components/responses/Problem413'
+        '415':
+          $ref: '#/components/responses/Problem415'
+        '422':
+          $ref: '#/components/responses/Problem422'
+        '429':
+          $ref: '#/components/responses/Problem429'
+        '500':
+          $ref: '#/components/responses/Problem500'
+        '503':
+          $ref: '#/components/responses/Problem503'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/v1/transactions/{eventId}:
+    get:
+      operationId: getTransaction
+      summary: Retrieve original scoped event and evaluation
+      x-required-role: read
+      parameters:
+      - name: eventId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/Identifier'
+      responses:
+        '200':
+          description: Original committed event/evaluation
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResource'
+        '400':
+          $ref: '#/components/responses/Problem400'
+        '401':
+          $ref: '#/components/responses/Problem401'
+        '403':
+          $ref: '#/components/responses/Problem403'
+        '404':
+          $ref: '#/components/responses/Problem404'
+        '429':
+          $ref: '#/components/responses/Problem429'
+        '500':
+          $ref: '#/components/responses/Problem500'
+        '503':
+          $ref: '#/components/responses/Problem503'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/v1/evaluations:
+    get:
+      operationId: listEvaluations
+      summary: List a bounded live keyset page
+      description: Ascending (acceptedAt,id). Not a stable snapshot or complete reconciliation feed under concurrent
+        commits. Date interval [acceptedFrom,acceptedTo); default range one day, configured maximum 31 days. Cursor
+        binds scope, filters, page size and resolved date bounds; repeat explicit filters and page size unchanged. Default dates are resolved from the database clock on the first page. Invalid or changed cursors return 400. Unknown, empty and duplicate query parameters are rejected.
+      x-required-role: read
+      parameters:
+      - name: customerId
+        in: query
+        schema:
+          $ref: '#/components/schemas/Identifier'
+      - name: decision
+        in: query
+        schema:
+          type: string
+          enum:
+          - CLEAR
+          - FLAGGED
+          - INDETERMINATE
+      - name: acceptedFrom
+        in: query
+        schema:
+          $ref: '#/components/schemas/Timestamp'
+      - name: acceptedTo
+        in: query
+        schema:
+          $ref: '#/components/schemas/Timestamp'
+      - name: pageSize
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      - name: cursor
+        in: query
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 2048
+      responses:
+        '200':
+          description: Bounded page; nextCursor omitted on last page
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationPage'
+        '400':
+          $ref: '#/components/responses/Problem400'
+        '401':
+          $ref: '#/components/responses/Problem401'
+        '403':
+          $ref: '#/components/responses/Problem403'
+        '422':
+          $ref: '#/components/responses/Problem422'
+        '429':
+          $ref: '#/components/responses/Problem429'
+        '500':
+          $ref: '#/components/responses/Problem500'
+        '503':
+          $ref: '#/components/responses/Problem503'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/v1/rules:
+    get:
+      operationId: getRules
+      summary: Inspect non-secret active policy
+      description: One captured active policy hash and all typed rule settings, including disabled rules. Requires POLICY; no credentials, startup limits or source YAML are returned. Changes are visible without restarting. Unknown query parameters are rejected.
+      x-required-role: policy
+      responses:
+        '200':
+          description: Active rule metadata/settings
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RulesView'
+        '400':
+          $ref: '#/components/responses/Problem400'
+        '401':
+          $ref: '#/components/responses/Problem401'
+        '403':
+          $ref: '#/components/responses/Problem403'
+        '429':
+          $ref: '#/components/responses/Problem429'
+        '500':
+          $ref: '#/components/responses/Problem500'
+        '503':
+          $ref: '#/components/responses/Problem503'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/v1/admin/policy:
+    get:
+      operationId: getEditablePolicy
+      summary: Read the complete editable active policy
+      description: Optional feature, disabled by default. Requires explicit global POLICY_ADMIN permission; ordinary POLICY permission is read-only inspection. Returns one joined active revision, hash and complete document. Unknown query parameters are rejected.
+      x-required-role: policy_admin
+      responses:
+        '200':
+          $ref: '#/components/responses/PolicySnapshot'
+        '400':
+          $ref: '#/components/responses/Problem400'
+        '401':
+          $ref: '#/components/responses/Problem401'
+        '403':
+          $ref: '#/components/responses/Problem403'
+        '429':
+          $ref: '#/components/responses/Problem429'
+        '500':
+          $ref: '#/components/responses/Problem500'
+        '503':
+          $ref: '#/components/responses/Problem503'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+    put:
+      operationId: activatePolicy
+      summary: Activate a policy only if its base revision is still current
+      description: 'Optional global POLICY_ADMIN operation. Revalidates the complete document and atomically compares the revision under the policy head lock. An unchanged hash preserves the revision. A stale revision returns 412 even after A-to-B-to-A policy changes. New evaluations see the activated policy without restart; stored results are unchanged. A transport failure or POLICY_OUTCOME_UNKNOWN 503 may follow activation: read the current policy before deciding what to do, without automatic retries.'
+      x-required-role: policy_admin
+      parameters:
+      - name: If-Match
+        in: header
+        required: true
+        description: One strong revision ETag obtained from GET, for example "policy-revision-1". Weak tags, lists and wildcard are unsupported. Missing header returns 428; malformed header returns 400.
+        schema:
+          type: string
+          pattern: '^"policy-revision-[1-9][0-9]*"$'
+      requestBody:
+        $ref: '#/components/requestBodies/PolicyDocument'
+      responses:
+        '200':
+          $ref: '#/components/responses/PolicySnapshot'
+        '400':
+          $ref: '#/components/responses/Problem400'
+        '401':
+          $ref: '#/components/responses/Problem401'
+        '403':
+          $ref: '#/components/responses/Problem403'
+        '412':
+          $ref: '#/components/responses/Problem412'
+        '413':
+          $ref: '#/components/responses/Problem413'
+        '415':
+          $ref: '#/components/responses/Problem415'
+        '422':
+          $ref: '#/components/responses/Problem422'
+        '428':
+          $ref: '#/components/responses/Problem428'
+        '429':
+          $ref: '#/components/responses/Problem429'
+        '500':
+          $ref: '#/components/responses/Problem500'
+        '503':
+          $ref: '#/components/responses/Problem503'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/v1/admin/policy/validate:
+    post:
+      operationId: validatePolicy
+      summary: Validate a complete policy without activating it
+      description: Optional global POLICY_ADMIN operation. Uses the same policy loader and rule verification as activation; does not create versions, activations or financial records. A successful validation does not reserve a revision. All administrator requests share one POLICY_ADMIN bucket per principal, using the existing policy quota settings.
+      x-required-role: policy_admin
+      requestBody:
+        $ref: '#/components/requestBodies/PolicyDocument'
+      responses:
+        '200':
+          description: Candidate is compatible with this service; no stored state was changed
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyValidation'
+        '400':
+          $ref: '#/components/responses/Problem400'
+        '401':
+          $ref: '#/components/responses/Problem401'
+        '403':
+          $ref: '#/components/responses/Problem403'
+        '413':
+          $ref: '#/components/responses/Problem413'
+        '415':
+          $ref: '#/components/responses/Problem415'
+        '422':
+          $ref: '#/components/responses/Problem422'
+        '429':
+          $ref: '#/components/responses/Problem429'
+        '500':
+          $ref: '#/components/responses/Problem500'
+        '503':
+          $ref: '#/components/responses/Problem503'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /health/live:
+    get:
+      operationId: liveness
+      security: []
+      description: Minimal process health; no dependency checks.
+      responses:
+        '200':
+          description: Process live
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /health/ready:
+    get:
+      operationId: readiness
+      security: []
+      description: Operational network only; exposure restricted by deployment. DB, Redis, schema and expected active
+        policy. No diagnostics in response.
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Generated key ID (1-64 ASCII letters, digits, underscore or hyphen), dot, and 64 lowercase hexadecimal secret characters. Role/scope/source permissions, expiry and revocation are read from protected database configuration at each admission; never send in URL.
+  schemas:
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+    Timestamp:
+      description: Explicit offset, valid calendar time, microsecond precision and normalized UTC year 0001–9999; leap seconds are unsupported.
+      type: string
+      format: date-time
+      pattern: ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$
+    Money:
+      type: string
+      pattern: ^(?:0|[1-9][0-9]{0,15})(?:\.[0-9]{1,4})?$
+      description: Decimal string. Domain validation additionally requires >0, configured currency scale and maximum;
+        no exponent.
+    PhysicalLocation:
+      type: object
+      additionalProperties: false
+      properties:
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        accuracyKm:
+          type: number
+          minimum: 0
+        source:
+          type: string
+          enum:
+          - VERIFIED_ATM_TERMINAL
+          - VERIFIED_CARD_PRESENT_TERMINAL
+        city:
+          type: string
+          maxLength: 128
+      required:
+      - latitude
+      - longitude
+      - accuracyKm
+      - source
+    TransactionInput:
+      type: object
+      additionalProperties: false
+      properties:
+        eventId:
+          $ref: '#/components/schemas/Identifier'
+        customerId:
+          $ref: '#/components/schemas/Identifier'
+        instrumentId:
+          $ref: '#/components/schemas/Identifier'
+        transactionType:
+          type: string
+          enum:
+          - CARD_PURCHASE
+          - ATM_WITHDRAWAL
+        status:
+          type: string
+          enum:
+          - BOOKED
+        channel:
+          type: string
+          enum:
+          - CARD_PRESENT
+          - ECOMMERCE
+          - ATM
+        amount:
+          $ref: '#/components/schemas/Money'
+        currency:
+          type: string
+          pattern: ^[A-Z]{3}$
+        category:
+          type: string
+          minLength: 1
+          maxLength: 64
+        occurredAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: For a new event, replace the illustrative timestamp with the current event time within the active policy's allowed age. Identical retries reuse the original timestamp and payload.
+        physicalLocation:
+          $ref: '#/components/schemas/PhysicalLocation'
+      required:
+      - eventId
+      - customerId
+      - instrumentId
+      - transactionType
+      - status
+      - channel
+      - amount
+      - currency
+      - category
+      - occurredAt
+      allOf:
+      - if:
+          properties:
+            transactionType:
+              const: ATM_WITHDRAWAL
+        then:
+          properties:
+            channel:
+              const: ATM
+        else:
+          properties:
+            channel:
+              enum:
+              - CARD_PRESENT
+              - ECOMMERCE
+    RuleResult:
+      type: object
+      additionalProperties: false
+      properties:
+        ruleId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: ^[A-Z][A-Z0-9_]*$
+          description: Stable extensible rule identifier. The configured registry defines active IDs, not a closed
+            API enum.
+        algorithmVersion:
+          type: string
+          minLength: 1
+          maxLength: 32
+        status:
+          type: string
+          enum:
+          - MATCH
+          - NO_MATCH
+          - NOT_APPLICABLE
+          - INSUFFICIENT_DATA
+          - DISABLED
+        reasonCode:
+          type: string
+          minLength: 1
+          maxLength: 64
+        evidence:
+          type: object
+          maxProperties: 16
+          propertyNames:
+            pattern: ^[a-zA-Z][a-zA-Z0-9]{0,63}$
+          additionalProperties:
+            oneOf:
+            - type: string
+              maxLength: 256
+            - type: number
+            - type: boolean
+          description: Bounded scalar rule facts. Fields are defined by rule ID, algorithm version and evidenceSchemaVersion
+            (a fact in this map). No credentials, payloads or raw coordinate history. Internal typed evidence is
+            tested per rule.
+      required:
+      - ruleId
+      - algorithmVersion
+      - status
+      - reasonCode
+      - evidence
+    Evaluation:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        eventId:
+          $ref: '#/components/schemas/Identifier'
+        decision:
+          type: string
+          enum:
+          - CLEAR
+          - FLAGGED
+          - INDETERMINATE
+        coverage:
+          type: string
+          enum:
+          - COMPLETE
+          - PARTIAL
+        policyHash:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        buildId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        acceptedAt:
+          $ref: '#/components/schemas/Timestamp'
+        evaluatedAt:
+          $ref: '#/components/schemas/Timestamp'
+        contextHighWatermark:
+          type: integer
+          minimum: 0
+        ruleResults:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: '#/components/schemas/RuleResult'
+      required:
+      - id
+      - eventId
+      - decision
+      - coverage
+      - policyHash
+      - buildId
+      - acceptedAt
+      - evaluatedAt
+      - contextHighWatermark
+      - ruleResults
+    TransactionResource:
+      type: object
+      additionalProperties: false
+      properties:
+        transaction:
+          $ref: '#/components/schemas/TransactionInput'
+        evaluation:
+          $ref: '#/components/schemas/Evaluation'
+      required:
+      - transaction
+      - evaluation
+    EvaluationPage:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/Evaluation'
+        nextCursor:
+          type: string
+          minLength: 1
+          maxLength: 2048
+      required:
+      - items
+    RulesView:
+      type: object
+      additionalProperties: false
+      properties:
+        policyHash:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        rules:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              ruleId:
+                type: string
+                minLength: 1
+                maxLength: 64
+                pattern: ^[A-Z][A-Z0-9_]*$
+                description: Stable extensible rule identifier. The configured registry defines active IDs, not
+                  a closed API enum.
+              algorithmVersion:
+                type: string
+                maxLength: 32
+              enabled:
+                type: boolean
+              settings:
+                type: object
+                description: Non-secret active rule policy; exact typed settings are defined by the rule configuration
+                  schema.
+            required:
+            - ruleId
+            - algorithmVersion
+            - enabled
+            - settings
+      required:
+      - policyHash
+      - rules
+    PolicyValidation:
+      type: object
+      additionalProperties: false
+      properties:
+        policyHash:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+      required: [policyHash]
+    EditablePolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        policyHash:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        document:
+          $ref: '#/components/schemas/PolicyDocument'
+      required: [revision, policyHash, document]
+    PolicyDocument:
+      type: object
+      additionalProperties: false
+      description: Complete business document, using configuration keys rather than rule IDs. Exactly the registered rule keys must be present; disable a rule explicitly. Currency-specific maps cover exactly the supported currencies, thresholds fit currency bounds, at least one rule remains enabled, and the travel candidate limit cannot exceed startup safety limits. Unknown fields and scalar coercion are rejected. Monetary settings are decimal strings.
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        canonicalizationVersion:
+          type: integer
+          const: 1
+        supportedCurrencies:
+          type: object
+          minProperties: 1
+          propertyNames:
+            pattern: ^[A-Z]{3}$
+          additionalProperties:
+            type: object
+            additionalProperties: false
+            properties:
+              scale:
+                type: integer
+                minimum: 0
+                maximum: 4
+              maxAmount:
+                $ref: '#/components/schemas/Money'
+            required: [scale, maxAmount]
+        ingest:
+          type: object
+          additionalProperties: false
+          properties:
+            maxEventAgeSeconds:
+              type: integer
+              minimum: 1
+            maxFutureSkewSeconds:
+              type: integer
+              minimum: 0
+          required: [maxEventAgeSeconds, maxFutureSkewSeconds]
+        rules:
+          type: object
+          minProperties: 1
+          maxProperties: 64
+          properties:
+            highAmount:
+              $ref: '#/components/schemas/HighAmountSettings'
+            transactionVelocity:
+              $ref: '#/components/schemas/VelocitySettings'
+            cumulativeSpend:
+              $ref: '#/components/schemas/CumulativeSpendSettings'
+            impossibleTravel:
+              $ref: '#/components/schemas/ImpossibleTravelSettings'
+            smallPaymentBurstThenLarge:
+              $ref: '#/components/schemas/SmallPaymentBurstSettings'
+          additionalProperties:
+            type: object
+            description: Additional registered rules publish their own typed settings; unknown rule keys are invalid.
+          required: [highAmount, transactionVelocity, cumulativeSpend, impossibleTravel, smallPaymentBurstThenLarge]
+      required: [schemaVersion, canonicalizationVersion, supportedCurrencies, ingest, rules]
+    CurrencyThresholds:
+      type: object
+      minProperties: 1
+      propertyNames:
+        pattern: ^[A-Z]{3}$
+      additionalProperties:
+        $ref: '#/components/schemas/Money'
+    HighAmountSettings:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        thresholds:
+          $ref: '#/components/schemas/CurrencyThresholds'
+      required: [enabled, thresholds]
+    VelocitySettings:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        windowSeconds:
+          type: integer
+          minimum: 1
+        maxTransactions:
+          type: integer
+          minimum: 1
+      required: [enabled, windowSeconds, maxTransactions]
+    CumulativeSpendSettings:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        windowSeconds:
+          type: integer
+          minimum: 1
+        thresholds:
+          $ref: '#/components/schemas/CurrencyThresholds'
+      required: [enabled, windowSeconds, thresholds]
+    ImpossibleTravelSettings:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        maxComparisonAgeSeconds:
+          type: integer
+          minimum: 1
+        maxCandidates:
+          type: integer
+          minimum: 1
+          maximum: 2147483646
+        maxSpeedKmh:
+          type: number
+          exclusiveMinimum: 0
+        minDistanceKm:
+          type: number
+          minimum: 0
+        travelAllowanceKm:
+          type: number
+          minimum: 0
+        maxAccuracyKm:
+          type: number
+          minimum: 0
+        trustedSources:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [VERIFIED_ATM_TERMINAL, VERIFIED_CARD_PRESENT_TERMINAL]
+        eligibleChannels:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [ATM, CARD_PRESENT]
+      required: [enabled, maxComparisonAgeSeconds, maxCandidates, maxSpeedKmh, minDistanceKm, travelAllowanceKm, maxAccuracyKm, trustedSources, eligibleChannels]
+    SmallPaymentBurstSettings:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        windowSeconds:
+          type: integer
+          minimum: 1
+        minSmallPayments:
+          type: integer
+          minimum: 1
+        smallPaymentMaximum:
+          $ref: '#/components/schemas/CurrencyThresholds'
+        largePaymentThreshold:
+          $ref: '#/components/schemas/CurrencyThresholds'
+      required: [enabled, windowSeconds, minSmallPayments, smallPaymentMaximum, largePaymentThreshold]
+    Problem:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        code:
+          type: string
+          maxLength: 64
+        correlationId:
+          type: string
+          maxLength: 128
+        retryable:
+          type: boolean
+        outcome:
+          type: string
+          enum:
+          - NOT_ACCEPTED
+          - UNKNOWN
+      required:
+      - type
+      - title
+      - status
+      - code
+      - correlationId
+      - retryable
+      - outcome
+    Health:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum:
+          - UP
+          - DOWN
+      required:
+      - status
+  requestBodies:
+    PolicyDocument:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PolicyDocument'
+  responses:
+    PolicySnapshot:
+      description: Current editable policy and revision; activation returns the policy it committed
+      headers:
+        ETag:
+          $ref: '#/components/headers/PolicyRevision'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/EditablePolicy'
+    Problem412:
+      description: POLICY_REVISION_CONFLICT; another activation changed the base revision. Preserve the draft, read the current policy and review before trying again.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem428:
+      description: POLICY_PRECONDITION_REQUIRED; activation requires the strong revision ETag in If-Match.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem400:
+      description: Malformed request/cursor
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem401:
+      description: Missing or invalid credentials
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+        WWW-Authenticate:
+          $ref: '#/components/headers/Authenticate'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem403:
+      description: Role or evidence-source denied
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem409:
+      description: Event payload or instrument ownership conflict
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem413:
+      description: Request too large
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem415:
+      description: Unsupported request media type
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem422:
+      description: New event violates domain/policy, or POLICY_INVALID for an incompatible administrator policy candidate
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem429:
+      description: Shared quota exhausted
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem500:
+      description: Unexpected application fault
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem503:
+      description: Dependency, admission or deadline failure; outcome can be unknown
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnexpectedError:
+      description: Other application errors such as 405/406 use Problem; an upstream proxy may have its own error
+        representation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem404:
+      description: Absent or inaccessible object
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  headers:
+    PolicyRevision:
+      schema:
+        type: string
+        pattern: '^"policy-revision-[1-9][0-9]*"$'
+      description: Strong active revision ETag for a conditional policy activation; changes even when a previous hash is activated again.
+    CacheControl:
+      schema:
+        type: string
+        const: no-store
+      description: Sensitive business responses are not cacheable.
+    CorrelationId:
+      schema:
+        type: string
+        maxLength: 128
+      description: Server-generated safe correlation identifier.
+    Authenticate:
+      schema:
+        type: string
+        const: ApiKey
+    RetryAfter:
+      schema:
+        type: integer
+        minimum: 1
+      description: Seconds before retry; required on retryable 503 and 429.
